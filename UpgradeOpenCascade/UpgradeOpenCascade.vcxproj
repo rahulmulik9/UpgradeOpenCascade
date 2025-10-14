@@ -134,6 +134,7 @@
     <ClCompile Include="VrmlData_Geometry.cxx" />
     <ClCompile Include="VrmlData_IndexedFaceSet.cxx" />
     <ClCompile Include="VrmlData_IndexedLineSet.cxx" />
+    <ClCompile Include="VrmlData_Material.cxx" />
     <ClCompile Include="VrmlData_Node.cxx" />
     <ClCompile Include="VrmlData_Scene.cxx" />
   </ItemGroup>
