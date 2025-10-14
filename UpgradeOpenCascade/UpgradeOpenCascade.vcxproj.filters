@@ -19,33 +19,4 @@
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="RWGltf_CafWriter.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="VrmlData_Node.cxx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="VrmlData_Scene.cxx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="VrmlData_Geometry.cxx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="VrmlData_IndexedFaceSet.cxx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="VrmlData_IndexedLineSet.cxx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="VrmlData_Material.cxx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="VrmlData_WorldInfo.cxx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="New folder\RWGltf_CafWriter.cxx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-  </ItemGroup>
 </Project>

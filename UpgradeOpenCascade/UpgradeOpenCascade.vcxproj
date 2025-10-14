@@ -129,17 +129,6 @@
   <ItemGroup>
     <ClInclude Include="RWGltf_CafWriter.h" />
   </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="New folder\RWGltf_CafWriter.cxx" />
-    <ClCompile Include="RWGltf_CafWriter.cpp" />
-    <ClCompile Include="VrmlData_Geometry.cxx" />
-    <ClCompile Include="VrmlData_IndexedFaceSet.cxx" />
-    <ClCompile Include="VrmlData_IndexedLineSet.cxx" />
-    <ClCompile Include="VrmlData_Material.cxx" />
-    <ClCompile Include="VrmlData_Node.cxx" />
-    <ClCompile Include="VrmlData_Scene.cxx" />
-    <ClCompile Include="VrmlData_WorldInfo.cxx" />
-  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
