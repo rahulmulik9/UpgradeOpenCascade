@@ -131,6 +131,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="RWGltf_CafWriter.cpp" />
+    <ClCompile Include="VrmlData_Geometry.cxx" />
     <ClCompile Include="VrmlData_Node.cxx" />
     <ClCompile Include="VrmlData_Scene.cxx" />
   </ItemGroup>

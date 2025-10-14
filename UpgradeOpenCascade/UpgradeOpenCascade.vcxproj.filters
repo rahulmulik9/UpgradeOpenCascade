@@ -29,5 +29,8 @@
     <ClCompile Include="VrmlData_Scene.cxx">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="VrmlData_Geometry.cxx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>
