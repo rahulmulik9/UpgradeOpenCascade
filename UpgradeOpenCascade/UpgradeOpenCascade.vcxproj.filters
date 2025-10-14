@@ -44,5 +44,8 @@
     <ClCompile Include="VrmlData_WorldInfo.cxx">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="New folder\RWGltf_CafWriter.cxx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

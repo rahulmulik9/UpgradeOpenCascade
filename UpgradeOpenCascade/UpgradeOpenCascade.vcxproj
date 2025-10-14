@@ -130,6 +130,7 @@
     <ClInclude Include="RWGltf_CafWriter.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="New folder\RWGltf_CafWriter.cxx" />
     <ClCompile Include="RWGltf_CafWriter.cpp" />
     <ClCompile Include="VrmlData_Geometry.cxx" />
     <ClCompile Include="VrmlData_IndexedFaceSet.cxx" />
