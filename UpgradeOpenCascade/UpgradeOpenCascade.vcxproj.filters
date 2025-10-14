@@ -26,5 +26,8 @@
     <ClCompile Include="VrmlData_Node.cxx">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="VrmlData_Scene.cxx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

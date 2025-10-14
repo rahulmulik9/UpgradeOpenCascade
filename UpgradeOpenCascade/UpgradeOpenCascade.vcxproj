@@ -132,6 +132,7 @@
   <ItemGroup>
     <ClCompile Include="RWGltf_CafWriter.cpp" />
     <ClCompile Include="VrmlData_Node.cxx" />
+    <ClCompile Include="VrmlData_Scene.cxx" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
