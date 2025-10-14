@@ -41,5 +41,8 @@
     <ClCompile Include="VrmlData_Material.cxx">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="VrmlData_WorldInfo.cxx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

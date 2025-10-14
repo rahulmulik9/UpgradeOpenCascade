@@ -137,6 +137,7 @@
     <ClCompile Include="VrmlData_Material.cxx" />
     <ClCompile Include="VrmlData_Node.cxx" />
     <ClCompile Include="VrmlData_Scene.cxx" />
+    <ClCompile Include="VrmlData_WorldInfo.cxx" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
