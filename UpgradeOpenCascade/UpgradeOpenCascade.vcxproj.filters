@@ -35,5 +35,8 @@
     <ClCompile Include="VrmlData_IndexedFaceSet.cxx">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="VrmlData_IndexedLineSet.cxx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>
