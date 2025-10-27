@@ -1,26 +1,15 @@
-// Created on: 2006-05-25
-// Created by: Alexander GRIGORIEV
-// Copyright (c) 2006-2014 OPEN CASCADE SAS
-//
-// This file is part of Open CASCADE Technology software library.
-//
-// This library is free software; you can redistribute it and/or modify it under
-// the terms of the GNU Lesser General Public License version 2.1 as published
-// by the Free Software Foundation, with special exception defined in the file
-// OCCT_LGPL_EXCEPTION.txt. Consult the file LICENSE_LGPL_21.txt included in OCCT
-// distribution for complete text of the license and disclaimer of any warranty.
-//
-// Alternatively, this file may be used under the terms of Open CASCADE
-// commercial license or contractual agreement.
-
+#include "VrmlData_Node.hxx"
+#include "VrmlData_InBuffer.hxx"
+#include "VrmlData_Proto.h"
+#include "VrmlData_Material.hxx"
+#include "VrmlData_Scene.hxx"
 #include <Precision.hxx>
 #include <VrmlData_Appearance.hxx>
 #include <VrmlData_ImageTexture.hxx>
-#include <VrmlData_Material.hxx>
 #include <VrmlData_ShapeNode.hxx>
 #include <VrmlData_UnknownNode.hxx>
-#include <VrmlData_Scene.hxx>
-#include <VrmlData_InBuffer.hxx>
+#include <gp_XY.hxx>
+#include <gp_XYZ.hxx>
 #include <VrmlData_Geometry.hxx>
 #include <VrmlData_TextureTransform.hxx>
 #include <VrmlData_Texture.hxx>
@@ -130,6 +119,17 @@ Standard_Boolean VrmlData_Node::IsDefault() const
     return Standard_False;
 }
 
+//=======================================================================
+
+Standard_EXPORT VrmlData_ErrorStatus VrmlData_Node::Process(VrmlData_InBuffer& theBuffer, Handle(VrmlData_Node)& parent, bool isobj)
+{
+    return VrmlData_NotImplemented;
+}
+
+Standard_EXPORT bool VrmlData_Node::isTopLevel() {
+    return false;
+}
+
 
 //=======================================================================
 //function : Write
@@ -231,13 +231,13 @@ VrmlData_ErrorStatus VrmlData_Node::ReadString
             char* ptr = &theBuffer.LinePtr[1];
             while (*ptr != '\0' && *ptr != '\"')
                 ptr++;
-            if (*ptr == '\0')
-                aStatus = VrmlData_StringInputError;
-            else {
-                *ptr = '\0';
-                theResult = (Standard_CString)&theBuffer.LinePtr[1];
-                theBuffer.LinePtr = ptr + 1;
-            }
+            //if (*ptr == '\0')
+            //  aStatus = VrmlData_StringInputError;
+            //else {
+            *ptr = '\0';
+            theResult = (Standard_CString)&theBuffer.LinePtr[1];
+            theBuffer.LinePtr = ptr + 1;
+            //}
         }
     }
     return aStatus;
@@ -275,6 +275,12 @@ VrmlData_ErrorStatus VrmlData_Node::ReadMultiString
             if (theBuffer.LinePtr[0] == ',') {
                 theBuffer.LinePtr++;
                 continue;
+
+            }
+            else if (theBuffer.LinePtr[0] == '"') {
+                VrmlData_Scene::readLine(theBuffer);
+                theBuffer.LinePtr++;
+                continue;
             }
             else if (theBuffer.LinePtr[0] == ']') // closing bracket
                 theBuffer.LinePtr++;
@@ -307,8 +313,8 @@ VrmlData_ErrorStatus VrmlData_Node::ReadNode
                 aNode = myScene->FindNode(aName.ToCString(), theType);
                 if (aNode.IsNull())
                     aStatus = VrmlData_NodeNameUnknown;
-                //         else
-                //           aNode = aNode->Clone(0L);
+                //        else
+                //          aNode = aNode->Clone(0L);
             }
         }
 
@@ -317,13 +323,19 @@ VrmlData_ErrorStatus VrmlData_Node::ReadNode
             const_cast<VrmlData_Scene*>(myScene)->createNode(theBuffer,
                 aNode,
                 theType)))
-            if (aNode.IsNull() == Standard_False)
-                // The node data are read here, including the final closing brace
+            if (aNode.IsNull() == Standard_False && VrmlData_Proto::IsProtoNode == false)
+                // The node data are read here, including the final closing brace 
                 aStatus = aNode->Read(theBuffer);
+
+        if (VrmlData_Proto::IsProtoNode == true) {
+            VrmlData_Proto::IsProtoNode = false;
+        }
+
 
         if (aStatus == VrmlData_StatusOK)
             theNode = aNode;
     }
+
     return aStatus;
 }
 
@@ -357,6 +369,7 @@ Handle(VrmlData_Node) VrmlData_ShapeNode::Clone
     }
     return aResult;
 }
+//=================================================================
 
 //=======================================================================
 //function : VrmlData_ShapeNode::Read
@@ -386,8 +399,11 @@ VrmlData_ErrorStatus VrmlData_ShapeNode::Read(VrmlData_InBuffer& theBuffer)
         else
             break;
 
-        if (!OK(aStatus))
-            break;
+        if (!OK(aStatus)) {
+            VrmlData_Scene::ReadLine(theBuffer);
+            continue;
+        }
+        //break;
     }
 
     // Read the terminating (closing) brace
@@ -443,6 +459,7 @@ VrmlData_ErrorStatus VrmlData_UnknownNode::Read(VrmlData_InBuffer& theBuffer)
     // This loop searches for any opening brace.
     // Such brace increments the level counter. A closing brace decrements
     // the counter. The loop terminates when the counter becomes negative.
+
     while (aLevelCounter >= 0 &&
         OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
     {
