@@ -1,22 +1,11 @@
-// Created on: 2006-05-25
-// Created by: Alexander GRIGORIEV
-// Copyright (c) 2006-2014 OPEN CASCADE SAS
-//
-// This file is part of Open CASCADE Technology software library.
-//
-// This library is free software; you can redistribute it and/or modify it under
-// the terms of the GNU Lesser General Public License version 2.1 as published
-// by the Free Software Foundation, with special exception defined in the file
-// OCCT_LGPL_EXCEPTION.txt. Consult the file LICENSE_LGPL_21.txt included in OCCT
-// distribution for complete text of the license and disclaimer of any warranty.
-//
-// Alternatively, this file may be used under the terms of Open CASCADE
-// commercial license or contractual agreement.
-
+#include "VrmlData_Node.hxx"
 #include <VrmlData_Scene.hxx>
+#include "VrmlData_InBuffer.hxx"
 #include <VrmlData_Appearance.hxx>
 #include <VrmlData_Box.hxx>
+#include <VrmlData_Color.hxx>
 #include <VrmlData_Cone.hxx>
+#include <VrmlData_Coordinate.hxx>
 #include <VrmlData_Cylinder.hxx>
 #include <VrmlData_DataMapOfShapeAppearance.hxx>
 #include <VrmlData_Group.hxx>
@@ -33,19 +22,51 @@
 #include <VrmlData_UnknownNode.hxx>
 //#include <VrmlData_WorldInfo.hxx>
 #include <NCollection_Vector.hxx>
+#include <TopoDS_TFace.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopExp_Explorer.hxx>
 #include <BRep_Builder.hxx>
 #include <Precision.hxx>
 #include <Standard_Version.hxx>
 #include <VrmlData_WorldInfo.hxx>
 #include <VrmlData_Geometry.hxx>
+#include "VrmlData_Proto.h"
+#include <Utils/Logger.h>
+#include <Macros.h>
 
 #ifdef _MSC_VER
 #define _CRT_SECURE_NO_DEPRECATE
 #pragma warning (disable:4996)
 #endif
+#include <vector>
+#include <map>
+#include <algorithm>
 
+
+
+std::string trim(const std::string& str,
+    const std::string& whitespace = " \t")
+{
+    const auto strBegin = str.find_first_not_of(whitespace);
+    if (strBegin == std::string::npos)
+        return ""; // no content
+
+    const auto strEnd = str.find_last_not_of(whitespace);
+    const auto strRange = strEnd - strBegin + 1;
+
+    return str.substr(strBegin, strRange);
+}
+
+
+std::string getProtoNodeName(std::string str) {
+    std::stringstream stream(str);
+    str.clear();
+    stream >> str;
+    if (stream.str().find("DEF") != std::string::npos)
+        stream >> str;
+    return str;
+}
 static void     dumpNode(Standard_OStream& theStream,
     const Handle(VrmlData_Node)& theNode,
     const TCollection_AsciiString& theIndent);
@@ -54,6 +75,7 @@ static void     dumpNodeHeader(Standard_OStream& theStream,
     const TCollection_AsciiString& theIndent,
     const char* theType,
     const char* theName);
+
 
 //=======================================================================
 //function : VrmlData_Scene
@@ -313,6 +335,13 @@ VrmlData_Scene& VrmlData_Scene::operator << (Standard_IStream& theInput)
         }
         // this line provides the method ReadNode in the present context
         Handle(VrmlData_Node) aNode;
+        if (VRMLDATA_LCOMPARE(aBuffer.LinePtr, "ROUTE")) {
+            LOG_INFO("Skipping ROUTE node...");
+            //aBuffer.Input.ignore('\n');
+            //continue;
+            readLine(aBuffer);
+            continue;
+        }
         myStatus = aNullNode->ReadNode(aBuffer, aNode);
         // Unknown nodes are not stored however they do not generate error
         if (myStatus != VrmlData_StatusOK)
@@ -434,6 +463,9 @@ VrmlData_ErrorStatus VrmlData_Scene::ReadWord
     return aStatus;
 }
 
+
+
+
 //=======================================================================
 //function : createNode
 //purpose  : 
@@ -447,10 +479,13 @@ VrmlData_ErrorStatus VrmlData_Scene::createNode
     VrmlData_ErrorStatus    aStatus;
     Handle(VrmlData_Node)   aNode;
     TCollection_AsciiString aName;
+    bool isProto = false;
+    bool isDef = false;
 
     // Read the DEF token to assign the node name
     if (VrmlData_Node::OK(aStatus, ReadLine(theBuffer))) {
         if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "DEF")) {
+            isDef = true;
             if (VrmlData_Node::OK(aStatus, ReadWord(theBuffer, aName)))
                 aStatus = ReadLine(theBuffer);
         }
@@ -459,20 +494,69 @@ VrmlData_ErrorStatus VrmlData_Scene::createNode
             return aStatus;
         }
     }
-
+    static bool protoNode = false;
+    static std::vector<TCollection_AsciiString> objs;
     const char* strName = aName.ToCString();
+    const char* grpName = strName;
     if (aStatus == VrmlData_StatusOK) {
         // create the new node
+        std::string str(theBuffer.LinePtr);
+        str = trim((str));
+        std::stringstream strm;
+        strm << str;
+        str.clear();
+        strm >> str;
+        static std::string shpName;
+        if (std::count(VrmlData_Proto::protos.begin(), VrmlData_Proto::protos.end(), str.c_str())) {
+            shpName = theBuffer.Line;
+            shpName = getProtoNodeName(shpName);
+            std::string tpename = aNode->get_type_name();
+            aNode = VrmlData_Proto::nodes[str.c_str()];
+            aNode->setName(shpName.c_str());
+            protoNode = true;
+            aNode->Process(theBuffer, aNode, false);
+            VrmlData_Proto::IsProtoNode = true;
+            if (aNode.IsNull() == Standard_False) {
+                myAllNodes.Append(aNode);
+                myNamedNodes.Add(aNode);
+            }
+            protoNode = false;
+            std::string brack = theBuffer.LinePtr;
+            while (trim(brack) == "}") {
+                theBuffer.LinePtr++;
+                brack = theBuffer.LinePtr;
+            }
+            theNode = aNode;
+            return VrmlData_StatusOK;
+        }
+        if (protoNode) {
+            grpName = shpName.c_str();
+        }
         if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Appearance"))
             aNode = new VrmlData_Appearance(*this, strName);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Shape"))
             aNode = new VrmlData_ShapeNode(*this, strName);
+
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Box"))
             aNode = new VrmlData_Box(*this, strName);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Color"))
             aNode = new VrmlData_Color(*this, strName);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Cone"))
             aNode = new VrmlData_Cone(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "CoordinateInterpolator")) {
+            VrmlData_ErrorStatus theStatus;
+            while (VrmlData_Node::OK(theStatus, VrmlData_Scene::ReadLine(theBuffer))) {
+                // read the end-of-list bracket
+                if (theBuffer.LinePtr[0] == '}') {
+                    readLine(theBuffer);
+                    return VrmlData_StatusOK;
+                }
+                else {
+                    readLine(theBuffer);
+                    continue;
+                }
+            }
+        }
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Coordinate")) {
             aNode = new VrmlData_Coordinate(*this, strName);
 
@@ -483,22 +567,25 @@ VrmlData_ErrorStatus VrmlData_Scene::createNode
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Cylinder"))
             aNode = new VrmlData_Cylinder(*this, strName);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Group"))
+            aNode = new VrmlData_Group(*this, grpName,
+                Standard_False);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Anchor"))
             aNode = new VrmlData_Group(*this, strName,
                 Standard_False);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Transform"))
-            aNode = new VrmlData_Group(*this, strName,
+            aNode = new VrmlData_Group(*this, grpName,
                 Standard_True);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Inline"))
-            aNode = new VrmlData_Group(*this, strName,
+            aNode = new VrmlData_Group(*this, grpName,
                 Standard_False);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Separator"))
-            aNode = new VrmlData_Group(*this, strName,
+            aNode = new VrmlData_Group(*this, grpName,
                 Standard_False);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Collision"))
-            aNode = new VrmlData_Group(*this, strName,
+            aNode = new VrmlData_Group(*this, grpName,
                 Standard_False);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Switch"))
-            aNode = new VrmlData_Group(*this, strName,
+            aNode = new VrmlData_Group(*this, grpName,
                 Standard_False);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "ImageTexture"))
             aNode = new VrmlData_ImageTexture(*this, strName);
@@ -516,43 +603,70 @@ VrmlData_ErrorStatus VrmlData_Scene::createNode
             aNode = new VrmlData_TextureCoordinate(*this, strName);
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "WorldInfo"))
             aNode = new VrmlData_WorldInfo(*this, strName);
-        else {
-            void* isProto = VRMLDATA_LCOMPARE(theBuffer.LinePtr, "PROTO");
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "EXTERNPROTO")) {
+            LOG_INFO("Skipping EXTERNPROTO node {}.....", theBuffer.LinePtr);
             TCollection_AsciiString aTitle;
             aStatus = ReadWord(theBuffer, aTitle);
-            if (isProto) {
-                aStatus = ReadLine(theBuffer);
-                if (aStatus == VrmlData_StatusOK) {
-                    if (theBuffer.LinePtr[0] != '[')
-                        aStatus = VrmlData_VrmlFormatError;
-                    else {
-                        theBuffer.LinePtr++;
-                        Standard_Integer aLevelCounter(0);
-                        // This loop searches for any opening bracket '['.
-                        // Such bracket increments the level counter. A closing bracket decrements
-                        // the counter. The loop terminates when the counter becomes negative.
-                        while (aLevelCounter >= 0 &&
-                            (aStatus = ReadLine(theBuffer)) == VrmlData_StatusOK) {
-                            int aChar;
-                            while ((aChar = theBuffer.LinePtr[0]) != '\0') {
-                                theBuffer.LinePtr++;
-                                if (aChar == '[') {
-                                    aLevelCounter++;
-                                    break;
-                                }
-                                else if (aChar == ']') {
-                                    aLevelCounter--;
-                                    break;
-                                }
+            aStatus = ReadLine(theBuffer);
+            if (aStatus == VrmlData_StatusOK) {
+                if (theBuffer.LinePtr[0] != '[')
+                    aStatus = VrmlData_VrmlFormatError;
+                else {
+                    theBuffer.LinePtr++;
+                    Standard_Integer aLevelCounter(0);
+                    // This loop searches for any opening bracket '['.
+                    // Such bracket increments the level counter. A closing bracket decrements
+                    // the counter. The loop terminates when the counter becomes negative.
+                    while (aLevelCounter >= 0 &&
+                        (aStatus = ReadLine(theBuffer)) == VrmlData_StatusOK) {
+                        int aChar;
+                        while ((aChar = theBuffer.LinePtr[0]) != '\0') {
+                            theBuffer.LinePtr++;
+                            if (aChar == '[') {
+                                aLevelCounter++;
+                                break;
+                            }
+                            else if (aChar == ']') {
+                                aLevelCounter--;
+                                break;
                             }
                         }
                     }
+                    //theBuffer.LinePtr++;
                 }
             }
-            if (aStatus == VrmlData_StatusOK)
+            ReadLine(theBuffer);
+            if (theBuffer.LinePtr) {
+                if (theBuffer.LinePtr[0] == '[') {
+                    while (theBuffer.LinePtr[0] != ']') {
+                        theBuffer.LinePtr++;
+                        if (theBuffer.LinePtr[0] == '\n' || theBuffer.LinePtr[0] == '\0') {
+                            ReadLine(theBuffer);
+                            break;
+                        }
+                    }
+                    theBuffer.LinePtr++;
+                }
+            }
+            return VrmlData_StatusOK;
+        }
+        else {
+            isProto = VRMLDATA_LCOMPARE(theBuffer.LinePtr, "PROTO");
+            //aNode = new VrmlData_Proto(*this, strName);
+            TCollection_AsciiString aTitle;
+            aStatus = ReadWord(theBuffer, aTitle);
+            if (isProto) {
+                Handle(VrmlData_Proto) node = new VrmlData_Proto(*this, aTitle);
+                VrmlData_Proto::protos.push_back(aTitle);
+                VrmlData_Proto::nodes[aTitle] = node;
+                aNode = node;
+            }
+            else {
+                LOG_INFO("Skipping unknown node {}.....", aTitle.ToCString());
                 aNode = new VrmlData_UnknownNode(*this,
                     strName,
                     aTitle.ToCString());
+            }
         }
     }
     aStatus = ReadLine(theBuffer);
@@ -562,6 +676,10 @@ VrmlData_ErrorStatus VrmlData_Scene::createNode
         if (theType.IsNull() == Standard_False)
             if (aNode->IsKind(theType) == Standard_False)
                 aStatus = VrmlData_VrmlFormatError;
+    }
+    if (isProto) {
+        theNode = aNode;
+        return VrmlData_StatusOK;
     }
     if (aStatus == VrmlData_StatusOK) {
         if (theBuffer.LinePtr[0] == '{') {
@@ -669,6 +787,7 @@ void VrmlData_Scene::createShape
     if (isSingleShape)
         outShape = aSingleShape;
 }
+
 
 //=======================================================================
 //function : ReadReal
@@ -1220,3 +1339,5 @@ void dumpNodeHeader(Standard_OStream& theStream,
     else
         theStream << ": \"" << theName << "\"\n";
 }
+
+
