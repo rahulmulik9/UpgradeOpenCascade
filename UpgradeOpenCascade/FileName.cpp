@@ -1,4 +1,4 @@
-// Created on: 2006-11-06
+// Created on: 2006-11-04
 // Created by: Alexander GRIGORIEV
 // Copyright (c) 2006-2014 OPEN CASCADE SAS
 //
@@ -13,16 +13,25 @@
 // Alternatively, this file may be used under the terms of Open CASCADE
 // commercial license or contractual agreement.
 
-#include <VrmlData_Group.hxx>
-#include <VrmlData_Scene.hxx>
-#include <VrmlData_WorldInfo.hxx>
+#include <VrmlData_IndexedFaceSet.hxx>
 #include <VrmlData_InBuffer.hxx>
-#include <VrmlData_ListOfNode.hxx>
 #include <VrmlData_UnknownNode.hxx>
+#include <BRep_TFace.hxx>
+#include <BRepMesh_Triangulator.hxx>
+#include <VrmlData_Coordinate.hxx>
+#include <VrmlData_Color.hxx>
+#include <VrmlData_Normal.hxx>
+#include <VrmlData_TextureCoordinate.hxx>
+#include <VrmlData_Scene.hxx>
 #include <Precision.hxx>
-#include <gp_Ax1.hxx>
+#include <NCollection_Vector.hxx>
+#include <NCollection_DataMap.hxx>
+#include <Poly.hxx>
+#include <TShort_HArray1OfShortReal.hxx>
+#include <TColgp_SequenceOfXYZ.hxx>
+#include <TColStd_SequenceOfInteger.hxx>
 
-IMPLEMENT_STANDARD_RTTIEXT(VrmlData_Group, VrmlData_Node)
+IMPLEMENT_STANDARD_RTTIEXT(VrmlData_IndexedFaceSet, VrmlData_Faceted)
 
 #ifdef _MSC_VER
 #define _CRT_SECURE_NO_DEPRECATE
@@ -30,428 +39,413 @@ IMPLEMENT_STANDARD_RTTIEXT(VrmlData_Group, VrmlData_Node)
 #endif
 
 
-//=======================================================================
-//function : VrmlData_Group
-//purpose  : Constructor
-//=======================================================================
 
-VrmlData_Group::VrmlData_Group(const VrmlData_Scene& theScene,
-    const char* theName,
-    const Standard_Boolean  isTransform)
-    : VrmlData_Node(theScene, theName),
-    myIsTransform(isTransform),
-    myNodes(theScene.Allocator())
-{
-}
 
 //=======================================================================
-//function : RemoveNode
+//function : readData
 //purpose  : 
 //=======================================================================
 
-Standard_Boolean VrmlData_Group::RemoveNode
-(const Handle(VrmlData_Node)& theNode)
+VrmlData_ErrorStatus VrmlData_Faceted::readData(VrmlData_InBuffer& theBuffer)
 {
-    Standard_Boolean aResult(Standard_False);
-    for (Iterator anIter = NodeIterator(); anIter.More(); anIter.Next())
-        if (anIter.Value() == theNode) {
-            aResult = Standard_True;
-            myNodes.Remove(anIter);
-            break;
-        }
-    return aResult;
-}
-
-//=======================================================================
-//function : SetTransform
-//purpose  : 
-//=======================================================================
-
-Standard_Boolean VrmlData_Group::SetTransform(const gp_Trsf& theTrsf)
-{
-    Standard_Boolean aResult(Standard_False);
-    if (myIsTransform) {
-        myTrsf = theTrsf;
-        aResult = Standard_True;
+    VrmlData_ErrorStatus aStatus(VrmlData_EmptyData);
+    Standard_Boolean aBool;
+    if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "ccw")) {
+        if (OK(aStatus, ReadBoolean(theBuffer, aBool)))
+            myIsCCW = aBool;
     }
-    return aResult;
+    else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "convex")) {
+        if (OK(aStatus, ReadBoolean(theBuffer, aBool)))
+            myIsConvex = aBool;
+    }
+    else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "solid")) {
+        if (OK(aStatus, ReadBoolean(theBuffer, aBool)))
+            myIsSolid = aBool;
+    }
+    else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "creaseAngle")) {
+        Standard_Real anAngle;
+        if (OK(aStatus, Scene().ReadReal(theBuffer, anAngle,
+            Standard_False, Standard_False))) {
+            if (anAngle < -Precision::Confusion() * 0.001)
+                aStatus = VrmlData_IrrelevantNumber;
+            else
+                myCreaseAngle = anAngle;
+        }
+    }
+    return aStatus;
 }
 
 //=======================================================================
-//function : VrmlData_Group::Clone
+//function : VrmlData_IndexedFaceSet::TShape
 //purpose  : 
 //=======================================================================
 
-Handle(VrmlData_Node) VrmlData_Group::Clone
+const Handle(TopoDS_TShape)& VrmlData_IndexedFaceSet::TShape()
+{
+    if (myNbPolygons == 0)
+    {
+        myTShape.Nullify();
+        return myTShape;
+    }
+    else if (!myIsModified) {
+        return myTShape;
+    }
+
+    // list of nodes:
+    const gp_XYZ* arrNodes = myCoords->Values();
+    const int nNodes = (int)myCoords->Length();
+
+    NCollection_Map <int> mapNodeId;
+    NCollection_Map <int> mapPolyId;
+    NCollection_List<TColStd_SequenceOfInteger> aPolygons;
+    NCollection_List<gp_Dir> aNorms;
+    Standard_Integer i = 0;
+    for (; i < (int)myNbPolygons; i++)
+    {
+        const Standard_Integer* arrIndice = myArrPolygons[i];
+        Standard_Integer nn = arrIndice[0];
+        if (nn < 3)
+        {
+            // bad polygon
+            continue;
+        }
+        TColStd_SequenceOfInteger aPolygon;
+        int in = 1;
+        for (; in <= nn; in++)
+        {
+            if (arrIndice[in] > nNodes)
+            {
+                break;
+            }
+            aPolygon.Append(arrIndice[in]);
+        }
+        if (in <= nn)
+        {
+            // bad index of node in polygon
+            continue;
+        }
+        // calculate normal
+        gp_XYZ aSum;
+        gp_XYZ aPrevP = arrNodes[aPolygon(1)];
+        for (in = 2; in < aPolygon.Length(); in++)
+        {
+            gp_XYZ aP1 = arrNodes[aPolygon(in)];
+            gp_XYZ aP2 = arrNodes[aPolygon(in + 1)];
+            gp_XYZ aV1 = aP1 - aPrevP;
+            gp_XYZ aV2 = aP2 - aPrevP;
+            gp_XYZ S = aV1.Crossed(aV2);
+            aSum += S;
+        }
+        if (aSum.Modulus() < Precision::Confusion())
+        {
+            // degenerate polygon
+            continue;
+        }
+        gp_Dir aNormal(aSum);
+        mapPolyId.Add(i);
+        aPolygons.Append(aPolygon);
+        aNorms.Append(aNormal);
+        // collect info about used indices
+        for (in = 1; in <= aPolygon.Length(); in++)
+        {
+            mapNodeId.Add(arrIndice[in]);
+        }
+    }
+
+    const Standard_Integer nbNodes(mapNodeId.Extent());
+    if (!nbNodes)
+    {
+        myIsModified = Standard_False;
+        myTShape.Nullify();
+        return myTShape;
+    }
+    // prepare vector of nodes
+    NCollection_Vector<gp_XYZ> aNodes;
+    NCollection_DataMap <int, int> mapIdId;
+    for (i = 0; i < nNodes; i++)
+    {
+        if (mapNodeId.Contains(i))
+        {
+            const gp_XYZ& aN1 = arrNodes[i];
+            mapIdId.Bind(i, aNodes.Length());
+            aNodes.Append(aN1);
+        }
+    }
+    // update polygon indices
+    NCollection_List<TColStd_SequenceOfInteger>::Iterator itP(aPolygons);
+    for (; itP.More(); itP.Next())
+    {
+        TColStd_SequenceOfInteger& aPolygon = itP.ChangeValue();
+        for (int in = 1; in <= aPolygon.Length(); in++)
+        {
+            Standard_Integer newIdx = mapIdId.Find(aPolygon.Value(in));
+            aPolygon.ChangeValue(in) = newIdx;
+        }
+    }
+    // calculate triangles
+    NCollection_List<Poly_Triangle> aTriangles;
+    itP.Init(aPolygons);
+    for (NCollection_List<gp_Dir>::Iterator itN(aNorms); itP.More(); itP.Next(), itN.Next())
+    {
+        NCollection_List<Poly_Triangle> aTrias;
+        try
+        {
+            NCollection_List<TColStd_SequenceOfInteger> aPList;
+            aPList.Append(itP.Value());
+            BRepMesh_Triangulator aTriangulator(aNodes, aPList, itN.Value());
+            aTriangulator.Perform(aTrias);
+            aTriangles.Append(aTrias);
+        }
+        catch (...)
+        {
+            continue;
+        }
+    }
+    if (aTriangles.IsEmpty())
+    {
+        return myTShape;
+    }
+
+    // Triangulation creation
+    Handle(Poly_Triangulation) aTriangulation =
+        new Poly_Triangulation(aNodes.Length(), aTriangles.Extent(), Standard_False);
+    // Copy the triangulation vertices
+    for (i = 0; i < aNodes.Length(); i++)
+    {
+        aTriangulation->SetNode(i + 1, gp_Pnt(aNodes(i)));
+    }
+    // Copy the triangles.
+    NCollection_List<Poly_Triangle>::Iterator itT(aTriangles);
+    for (i = 1; itT.More(); itT.Next(), i++)
+    {
+        aTriangulation->SetTriangle(i, itT.Value());
+    }
+
+    Handle(BRep_TFace) aFace = new BRep_TFace();
+    aFace->Triangulation(aTriangulation);
+    myTShape = aFace;
+
+    // Normals should be defined; if they are not, compute them
+    if (myNormals.IsNull()) {
+        Poly::ComputeNormals(aTriangulation);
+    }
+    else
+    {
+        // Copy the normals. Currently only normals-per-vertex are supported.
+        if (myNormalPerVertex)
+        {
+            aTriangulation->AddNormals();
+            if (myArrNormalInd == 0L)
+            {
+                for (i = 0; i < nbNodes; i++)
+                {
+                    const gp_XYZ& aNormal = myNormals->Normal(i);
+                    aTriangulation->SetNormal(i + 1, aNormal);
+                }
+            }
+            else
+            {
+                for (i = 0; i < (int)myNbPolygons; i++)
+                {
+                    if (mapPolyId.Contains(i)) // check to avoid previously skipped faces
+                    {
+                        const Standard_Integer* anArrNodes;
+                        Polygon(i, anArrNodes);
+                        const Standard_Integer* arrIndice;
+                        int nbn = IndiceNormals(i, arrIndice);
+                        for (Standard_Integer j = 0; j < nbn; j++)
+                        {
+                            const gp_XYZ& aNormal = myNormals->Normal(arrIndice[j]);
+                            aTriangulation->SetNormal(mapIdId(anArrNodes[j]) + 1, aNormal);
+                        }
+                    }
+                }
+            }
+        }
+        else {
+            //TODO ..
+        }
+    }
+
+    myIsModified = Standard_False;
+
+    return myTShape;
+}
+
+//=======================================================================
+//function : VrmlData_IndexedFaceSet::Clone
+//purpose  : 
+//=======================================================================
+
+Handle(VrmlData_Node) VrmlData_IndexedFaceSet::Clone
 (const Handle(VrmlData_Node)& theOther) const
 {
-    Handle(VrmlData_Group) aResult =
-        Handle(VrmlData_Group)::DownCast(VrmlData_Node::Clone(theOther));
+    Handle(VrmlData_IndexedFaceSet) aResult =
+        Handle(VrmlData_IndexedFaceSet)::DownCast(VrmlData_Node::Clone(theOther));
     if (aResult.IsNull())
         aResult =
-        new VrmlData_Group(theOther.IsNull() ? Scene() : theOther->Scene(),
-            Name(), myIsTransform);
+        new VrmlData_IndexedFaceSet(theOther.IsNull() ? Scene() : theOther->Scene(),
+            Name());
 
-    aResult->myIsTransform = myIsTransform;
-    if (&aResult->Scene() == &Scene())
-        aResult->myNodes = myNodes;
+    if (&aResult->Scene() == &Scene()) {
+        aResult->SetCoordinates(myCoords);
+        aResult->SetNormals(myNormals);
+        aResult->SetColors(myColors);
+        aResult->SetPolygons(myNbPolygons, myArrPolygons);
+        aResult->SetNormalInd(myNbNormals, myArrNormalInd);
+        aResult->SetColorInd(myNbColors, myArrColorInd);
+        aResult->SetTextureCoordInd(myNbTextures, myArrTextureInd);
+    }
     else {
         // Create a dummy node to pass the different Scene instance to methods Clone
         const Handle(VrmlData_UnknownNode) aDummyNode =
             new VrmlData_UnknownNode(aResult->Scene());
-        Iterator anIter(myNodes);
-        for (; anIter.More(); anIter.Next()) {
-            const Handle(VrmlData_Node)& aNode = anIter.Value();
-            if (aNode.IsNull() == Standard_False)
-                aResult->myNodes.Append(aNode->Clone(aDummyNode));
-        }
+        if (myCoords.IsNull() == Standard_False)
+            aResult->SetCoordinates(Handle(VrmlData_Coordinate)::DownCast
+            (myCoords->Clone(aDummyNode)));
+        if (myNormals.IsNull() == Standard_False)
+            aResult->SetNormals(Handle(VrmlData_Normal)::DownCast
+            (myNormals->Clone(aDummyNode)));
+        if (myColors.IsNull() == Standard_False)
+            aResult->SetColors(Handle(VrmlData_Color)::DownCast
+            (myColors->Clone(aDummyNode)));
+        //TODO: Replace the following lines with the relevant copying
+        aResult->SetPolygons(myNbPolygons, myArrPolygons);
+        aResult->SetNormalInd(myNbNormals, myArrNormalInd);
+        aResult->SetColorInd(myNbColors, myArrColorInd);
+        aResult->SetTextureCoordInd(myNbTextures, myArrTextureInd);
     }
-    if (myIsTransform)
-        aResult->SetTransform(myTrsf);
-    aResult->SetBox(myBox);
-
+    aResult->SetNormalPerVertex(myNormalPerVertex);
+    aResult->SetColorPerVertex(myColorPerVertex);
     return aResult;
 }
 
 //=======================================================================
-//function : FindNode
+//function : VrmlData_IndexedFaceSet::Read
 //purpose  : 
 //=======================================================================
 
-Handle(VrmlData_Node) VrmlData_Group::FindNode
-(const char* theName,
-    gp_Trsf& theLocation) const
-{
-    Handle(VrmlData_Node) aResult;
-    Iterator anIter(myNodes);
-    for (; anIter.More(); anIter.Next()) {
-        const Handle(VrmlData_Node)& aNode = anIter.Value();
-        if (aNode.IsNull() == Standard_False) {
-            if (strcmp(aNode->Name(), theName) == 0)
-            {
-                aResult = aNode;
-                theLocation = myTrsf;
-                break;
-            }
-            // Try a Group type of node
-            if (aNode->IsKind(STANDARD_TYPE(VrmlData_Group)))
-            {
-                const Handle(VrmlData_Group) aGroup =
-                    Handle(VrmlData_Group)::DownCast(aNode);
-                if (aGroup.IsNull() == Standard_False) {
-                    aResult = aGroup->FindNode(theName, theLocation);
-                    if (aResult.IsNull() == Standard_False) {
-                        //theLocation *= myTrsf;
-                        theLocation.PreMultiply(myTrsf);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    return aResult;
-}
-
-//=======================================================================
-//function : VrmlData_Group::Read
-//purpose  : 
-//=======================================================================
-
-VrmlData_ErrorStatus VrmlData_Group::Read(VrmlData_InBuffer& theBuffer)
+VrmlData_ErrorStatus VrmlData_IndexedFaceSet::Read(VrmlData_InBuffer& theBuffer)
 {
     VrmlData_ErrorStatus aStatus;
-    gp_XYZ aBoxCenter(0., 0., 0.), aBoxSize(-1., -1., -1.);
-    gp_XYZ aCenter(0., 0., 0.), aScale(1., 1., 1.), aTrans(0., 0., 0.);
-    gp_XYZ aRotAxis(0., 0., 1.), aScaleAxis(0., 0., 1.);
-    Standard_Real aRotAngle(0.), aScaleAngle(0.);
-
+    const VrmlData_Scene& aScene = Scene();
     while (OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
     {
-        if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "bboxCenter"))
-            aStatus = Scene().ReadXYZ(theBuffer, aBoxCenter,
-                Standard_True, Standard_False);
-
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "bboxSize"))
-            aStatus = Scene().ReadXYZ(theBuffer, aBoxSize,
-                Standard_True, Standard_False);
-
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "children")) {
-            Standard_Boolean isBracketed(Standard_False);
-            // Read the opening bracket for the list of children
-            if (!OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
-                break;
-            if (theBuffer.LinePtr[0] == '[') {
-                theBuffer.LinePtr++;
-                if (!OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
-                    break;
-                isBracketed = Standard_True;
-            }
-
-            // Read the child nodes
-            Handle(VrmlData_Node) aChildNode;
-            while (OK(aStatus, VrmlData_Scene::ReadLine(theBuffer))) {
-                // read the end-of-list bracket
-                if (isBracketed && theBuffer.LinePtr[0] == ']') {
-                    theBuffer.LinePtr++;
-                    break;
-                }
-                // otherwise read a node
-                if (!OK(aStatus, ReadNode(theBuffer, aChildNode)))
-                    break;
-                AddNode(aChildNode);
-                if (isBracketed == Standard_False)
-                    break;
-            }
-        }
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "collide")) {
-            TCollection_AsciiString aDummy;
-            aStatus = Scene().ReadWord(theBuffer, aDummy);
-        }
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Separator") ||
-            VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Switch")) {
-            Standard_Boolean isBracketed(Standard_False);
-            // Read the opening bracket for the list of children
-            if (!OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
-                break;
-
-            if (theBuffer.LinePtr[0] == '{') {
-                theBuffer.LinePtr++;
-                if (!OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
-                    break;
-                isBracketed = Standard_True;
-            }
-
-            // Read the child nodes
-            Handle(VrmlData_Node) aChildNode;
-            while (OK(aStatus, VrmlData_Scene::ReadLine(theBuffer))) {
-                // read the end-of-list bracket
-                if (isBracketed && theBuffer.LinePtr[0] == '}') {
-                    theBuffer.LinePtr++;
-                    break;
-                }
-
-                // otherwise read a node
-                if (!OK(aStatus, ReadNode(theBuffer, aChildNode)))
-                    break;
-
-                AddNode(aChildNode);
-                if (isBracketed == Standard_False)
-                    break;
-            }
-        }
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "ShapeHints")) {
-            // Skip this tag
-            if (!OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
-                break;
-
-            if (theBuffer.LinePtr[0] == '{') {
-                theBuffer.LinePtr++;
-                if (!OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
-                    break;
-
-                while (OK(aStatus, VrmlData_Scene::ReadLine(theBuffer))) {
-                    // read the end-of-list bracket
-                    if (theBuffer.LinePtr[0] == '}') {
-                        theBuffer.LinePtr++;
-                        break;
-                    }
-                    theBuffer.LinePtr++;
-                }
-            }
-        }
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "center"))
-            if (myIsTransform)
-                aStatus = Scene().ReadXYZ(theBuffer, aCenter,
-                    Standard_True, Standard_False);
-            else {
-                aStatus = VrmlData_VrmlFormatError;
-                break;
-            }
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "rotation"))
-            if (myIsTransform) {
-                if (OK(aStatus, Scene().ReadXYZ(theBuffer, aRotAxis,
-                    Standard_False, Standard_False)))
-                {
-                    if (aRotAxis.SquareModulus() < Precision::Confusion())
-                        aRotAxis.SetZ(1.0);
-                    aStatus = Scene().ReadReal(theBuffer, aRotAngle,
-                        Standard_False, Standard_False);
-                }
-            }
-            else {
-                aStatus = VrmlData_VrmlFormatError;
-                break;
-            }
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "scaleOrientation"))
-            if (myIsTransform) {
-                if (OK(aStatus, Scene().ReadXYZ(theBuffer, aScaleAxis,
-                    Standard_False, Standard_False)))
-                    aStatus = Scene().ReadReal(theBuffer, aScaleAngle,
-                        Standard_False, Standard_False);
-            }
-            else {
-                aStatus = VrmlData_VrmlFormatError;
-                break;
-            }
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "scale"))
-            if (myIsTransform)
-                aStatus = Scene().ReadXYZ(theBuffer, aScale,
-                    Standard_False, Standard_True);
-            else {
-                aStatus = VrmlData_VrmlFormatError;
-                break;
-            }
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "translation"))
-            if (myIsTransform)
-                aStatus = Scene().ReadXYZ(theBuffer, aTrans,
-                    Standard_True, Standard_False);
-            else {
-                aStatus = VrmlData_VrmlFormatError;
-                break;
-            }
-        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "url")) {
-            NCollection_List<TCollection_AsciiString> lstURL;
-            if (OK(aStatus, ReadMultiString(theBuffer, lstURL))) {
-                NCollection_List<TCollection_AsciiString>::Iterator anIter(lstURL);
-                for (; anIter.More(); anIter.Next()) {
-                    std::ifstream aStream;
-                    const TCollection_AsciiString& aFileName = anIter.Value();
-                    if (!OK(aStatus, openFile(aStream, aFileName)))
-                        break;
-                    VrmlData_Scene aScene(Scene().Allocator());
-                    aScene.myLinearScale = Scene().myLinearScale;
-                    aScene.myVrmlDir = Scene().myVrmlDir;
-                    aScene << aStream;
-                    if (!OK(aStatus, aScene.Status()))
-                        break;
-                    VrmlData_Scene::Iterator anIterN = aScene.GetIterator();
-                    for (; anIterN.More(); anIterN.Next())
-                        if (!anIterN.Value()->IsKind(STANDARD_TYPE(VrmlData_WorldInfo)))
-                            AddNode(anIterN.Value());
-                    VrmlData_Scene::Iterator anAllIter(aScene.myAllNodes);
-                    for (; anAllIter.More(); anAllIter.Next()) {
-                        const Handle(VrmlData_Node)& aNode = anAllIter.Value();
-                        if (aNode->IsKind(STANDARD_TYPE(VrmlData_WorldInfo)))
-                            continue;
-                        const_cast <VrmlData_Scene&> (Scene()).myAllNodes.Append(aNode);
-                        aNode->myScene = &Scene();
-                        // The name of the imported node should be prefixed by the URL
-                        // because each name must remain unique in the global scene.
-                        if (aNode->Name())
-                            if (*aNode->Name() != '\0') {
-                                TCollection_AsciiString buf;
-                                buf += aFileName;
-                                Standard_Integer aCharLocation = buf.Location(1, '.', 1, buf.Length());
-                                if (aCharLocation != 0)
-                                {
-                                    buf.Remove(aCharLocation, buf.Length() - aCharLocation + 1);
-                                }
-                                buf += '_';
-                                buf += aNode->Name();
-                                const size_t len = buf.Length();
-                                char* aNewName =
-                                    static_cast<char*> (Scene().Allocator()->Allocate(len));
-                                if (aNewName) {
-                                    aNode->myName = aNewName;
-                                    memcpy(aNewName, buf.ToCString(), len);
-                                }
-                            }
-                    }
-                }
-            }
-        }
-        else
+        if (OK(aStatus, VrmlData_Faceted::readData(theBuffer)))
+            continue;
+        if (aStatus != VrmlData_EmptyData)
             break;
-
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "colorPerVertex"))
+            aStatus = ReadBoolean(theBuffer, myColorPerVertex);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "normalPerVertex"))
+            aStatus = ReadBoolean(theBuffer, myNormalPerVertex);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "coordIndex"))
+        {
+            aStatus = aScene.ReadArrIndex(theBuffer, myArrPolygons, myNbPolygons);
+            //for (int i = 0; i < myNbPolygons; i++)
+            //{
+            //  const Standard_Integer * anArray = myArrPolygons[i];
+            //  Standard_Integer nbPoints = anArray[0];
+            //  std::cout << "i = " << i << "  indexes:";
+            //  for (int ip = 1; ip <= nbPoints; ip++)
+            //  {
+            //    std::cout << " " << anArray[ip];
+            //  }
+            //  std::cout << std::endl;
+            //}
+        }
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "colorIndex"))
+            aStatus = aScene.ReadArrIndex(theBuffer, myArrColorInd, myNbColors);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "normalIndex"))
+            aStatus = aScene.ReadArrIndex(theBuffer, myArrNormalInd, myNbNormals);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "texCoordIndex"))
+            aStatus = aScene.ReadArrIndex(theBuffer, myArrTextureInd, myNbTextures);
+        // These four checks should be the last one to avoid their interference
+        // with the other tokens (e.g., coordIndex)
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "texCoord"))
+        {
+            Handle(VrmlData_Node) aNode;
+            aStatus = ReadNode(theBuffer, aNode,
+                STANDARD_TYPE(VrmlData_TextureCoordinate));
+            myTxCoords = Handle(VrmlData_TextureCoordinate)::DownCast(aNode);
+        }
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "color"))
+        {
+            Handle(VrmlData_Node) aNode;
+            aStatus = ReadNode(theBuffer, aNode,
+                STANDARD_TYPE(VrmlData_Color));
+            myColors = Handle(VrmlData_Color)::DownCast(aNode);
+        }
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "coord"))
+        {
+            Handle(VrmlData_Node) aNode;
+            aStatus = ReadNode(theBuffer, aNode,
+                STANDARD_TYPE(VrmlData_Coordinate));
+            myCoords = Handle(VrmlData_Coordinate)::DownCast(aNode);
+        }
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "normal"))
+        {
+            Handle(VrmlData_Node) aNode;
+            aStatus = ReadNode(theBuffer, aNode,
+                STANDARD_TYPE(VrmlData_Normal));
+            myNormals = Handle(VrmlData_Normal)::DownCast(aNode);
+        }
         if (!OK(aStatus))
             break;
     }
-
     // Read the terminating (closing) brace
-    if (OK(aStatus))
-        aStatus = readBrace(theBuffer);
-    if (OK(aStatus)) {
-        // Check if the Bounding Box has been imported
-        if (aBoxSize.X() > -Precision::Confusion() &&
-            aBoxSize.Y() > -Precision::Confusion() &&
-            aBoxSize.Z() > -Precision::Confusion())
-        {
-            myBox.SetCenter(aBoxCenter);
-            myBox.SetHSize(aBoxSize * 0.5);
+    if (OK(aStatus) || aStatus == VrmlData_EmptyData)
+        if (OK(aStatus, readBrace(theBuffer))) {
+            // Post-processing
+            ;
         }
-        if (myIsTransform) {
-            // Create the corresponding transformation.
-            gp_Trsf tRot, tCentInv;
-            myTrsf.SetTranslation(aTrans + aCenter);
-            gp_Ax1 aRotation(gp::Origin(), aRotAxis);
-            tRot.SetRotation(gp_Ax1(gp::Origin(), aRotAxis), aRotAngle);
-            myTrsf.Multiply(tRot);
-            // Check that the scale is uniform (the same value in all 3 directions.
-            // Only in this case the scaling is applied.
-            const Standard_Real aScaleDiff[2] = {
-              aScale.X() - aScale.Y(),
-              aScale.X() - aScale.Z()
-            };
-            if (aScaleDiff[0] * aScaleDiff[0] + aScaleDiff[1] * aScaleDiff[1]
-                < Precision::Confusion())
-            {
-                gp_Trsf tScale;
-                tScale.SetScale(gp::Origin(), (aScale.X() + aScale.Y() + aScale.Z()) / 3.);
-                myTrsf.Multiply(tScale);
-            }
-            tCentInv.SetTranslation(aCenter.Reversed());
-            myTrsf.Multiply(tCentInv);
-        }
-    }
     return aStatus;
 }
 
+// //=======================================================================
+// //function : dummyReadBrackets
+// //purpose  : static (local) function
+// //=======================================================================
+
+// VrmlData_ErrorStatus dummyReadBrackets (VrmlData_InBuffer& theBuffer)
+// {
+//   VrmlData_ErrorStatus aStatus;
+//   Standard_Integer aLevelCounter (0);
+//   // This loop searches for any opening bracket.
+//   // Such bracket increments the level counter. A closing bracket decrements
+//   // the counter. The loop terminates when the counter becomes zero.
+//   while ((aStatus = VrmlData_Scene::ReadLine(theBuffer)) == VrmlData_StatusOK)
+//   {
+//     int aChar;
+//     while ((aChar = theBuffer.LinePtr[0]) != '\0') {
+//       theBuffer.LinePtr++;
+//       if        (aChar == '[') {
+//         aLevelCounter++;
+//         break;
+//       } else if (aChar == ']') {
+//         aLevelCounter--;
+//         break;
+//       }
+//     }
+//     if (aLevelCounter <= 0)
+//       break;
+//   }
+//   return aStatus;
+// }
+
 //=======================================================================
-//function : Shape
+//function : IsDefault
 //purpose  : 
 //=======================================================================
 
-void VrmlData_Group::Shape(TopoDS_Shape& theShape,
-    VrmlData_DataMapOfShapeAppearance* pMapApp)
+Standard_Boolean VrmlData_IndexedFaceSet::IsDefault() const
 {
-    VrmlData_Scene::createShape(theShape, myNodes, pMapApp);
-    theShape.Location(myTrsf, Standard_False);
-}
-
-//=======================================================================
-//function : openFile
-//purpose  : 
-//=======================================================================
-
-VrmlData_ErrorStatus VrmlData_Group::openFile
-(Standard_IStream& theStream,
-    const TCollection_AsciiString& theFilename)
-{
-    std::ifstream& aStream = static_cast<std::ifstream&> (theStream);
-    VrmlData_ErrorStatus aStatus(VrmlData_EmptyData);
-    NCollection_List<TCollection_ExtendedString>::Iterator aDirIter =
-        Scene().VrmlDirIterator();
-    for (; aDirIter.More(); aDirIter.Next()) {
-        if (!aDirIter.Value().IsAscii())
-            continue;
-        const TCollection_AsciiString aFullName =
-            TCollection_AsciiString(aDirIter.Value()) + theFilename;
-        aStream.open(aFullName.ToCString(), std::ios::in);
-        if (aStream.fail())
-            aStream.clear();
-        else {
-            aStatus = VrmlData_StatusOK;
-            break;
-        }
-    }
-    if (aStatus == VrmlData_EmptyData) {
-        aStream.open(theFilename.ToCString(), std::ios::in);
-        if (!aStream.fail())
-            aStatus = VrmlData_StatusOK;
-    }
-    if (aStatus == VrmlData_EmptyData)
-        aStatus = VrmlData_CannotOpenFile;
-    return aStatus;
+    Standard_Boolean aResult(Standard_True);
+    if (myNbPolygons)
+        aResult = Standard_False;
+    else if (myCoords.IsNull() == Standard_False)
+        aResult = myCoords->IsDefault();
+    return aResult;
 }
 
 //=======================================================================
@@ -459,88 +453,67 @@ VrmlData_ErrorStatus VrmlData_Group::openFile
 //purpose  : 
 //=======================================================================
 
-VrmlData_ErrorStatus VrmlData_Group::Write(const char* thePrefix) const
+VrmlData_ErrorStatus VrmlData_IndexedFaceSet::Write
+(const char* thePrefix) const
 {
-    VrmlData_ErrorStatus aStatus(VrmlData_StatusOK);
-    if (myNodes.IsEmpty() == Standard_False) {
-        const VrmlData_Scene& aScene = Scene();
-        Standard_Boolean isTransform = myIsTransform;
-        if (isTransform && myTrsf.Form() == gp_Identity)
-            isTransform = Standard_False;
-        static const char* header[2] = { "Group {" , "Transform {" };
-        if (OK(aStatus, aScene.WriteLine(thePrefix, header[isTransform ? 1 : 0],
-            GlobalIndent())))
-        {
-            char buf[240];
-            if (OK(aStatus) && aScene.IsDummyWrite() == Standard_False)
-            {
-                const gp_XYZ aBoxCorner[2] = {
-                  myBox.CornerMin(),
-                  myBox.CornerMax()
-                };
-                // Check that the box is not void
-                if (aBoxCorner[0].X() < aBoxCorner[1].X() + Precision::Confusion()) {
-                    Sprintf(buf, "bboxCenter  %.9g %.9g %.9g",
-                        0.5 * (aBoxCorner[0].X() + aBoxCorner[1].X()),
-                        0.5 * (aBoxCorner[0].Y() + aBoxCorner[1].Y()),
-                        0.5 * (aBoxCorner[0].Z() + aBoxCorner[1].Z()));
-                    aStatus = aScene.WriteLine(buf);
-                    if (OK(aStatus)) {
-                        Sprintf(buf, "bboxSize    %.9g %.9g %.9g",
-                            aBoxCorner[1].X() - aBoxCorner[0].X(),
-                            aBoxCorner[1].Y() - aBoxCorner[0].Y(),
-                            aBoxCorner[1].Z() - aBoxCorner[0].Z());
-                        aStatus = aScene.WriteLine(buf);
-                    }
-                }
-            }
-            if (OK(aStatus) && isTransform && aScene.IsDummyWrite() == Standard_False)
-            {
-                // Output the Scale
-                const Standard_Real aScaleFactor = myTrsf.ScaleFactor();
-                if ((aScaleFactor - 1.) * (aScaleFactor - 1.) >
-                    0.0001 * Precision::Confusion())
-                {
-                    Sprintf(buf, "scale       %.12g %.12g %.12g",
-                        aScaleFactor, aScaleFactor, aScaleFactor);
-                    aStatus = aScene.WriteLine(buf);
-                }
+    static char header[] = "IndexedFaceSet {";
+    const VrmlData_Scene& aScene = Scene();
+    VrmlData_ErrorStatus aStatus;
+    if (OK(aStatus, aScene.WriteLine(thePrefix, header, GlobalIndent()))) {
 
-                // Output the Translation
-                const gp_XYZ& aTrans = myTrsf.TranslationPart();
-                if (aTrans.SquareModulus() > 0.0001 * Precision::Confusion()) {
-                    Sprintf(buf, "translation %.12g %.12g %.12g",
-                        aTrans.X(), aTrans.Y(), aTrans.Z());
-                    aStatus = aScene.WriteLine(buf);
-                }
-
-                // Output the Rotation
-                gp_XYZ anAxis;
-                Standard_Real anAngle;
-                if (myTrsf.GetRotation(anAxis, anAngle)) {
-                    // output the Rotation
-                    Sprintf(buf, "rotation    %.12g %.12g %.12g %.9g",
-                        anAxis.X(), anAxis.Y(), anAxis.Z(), anAngle);
-                    aStatus = aScene.WriteLine(buf);
-                }
-            }
-
-            if (OK(aStatus)) {
-
-                aStatus = aScene.WriteLine("children [", 0L, GlobalIndent());
-
-                VrmlData_ListOfNode::Iterator anIterChild(myNodes);
-                for (; anIterChild.More() && OK(aStatus); anIterChild.Next()) {
-                    const Handle(VrmlData_Node)& aNode = anIterChild.Value();
-                    aScene.WriteNode(0L, aNode);
-                }
-
-                if (OK(aStatus)) {
-                    aStatus = aScene.WriteLine("]", 0L, -GlobalIndent());
-                }
-            }
-            aStatus = WriteClosing();
+        // Write the attributes of interface "VrmlData_Faceted"
+        if (IsCCW() == Standard_False)
+            aStatus = aScene.WriteLine("ccw         FALSE");
+        if (OK(aStatus) && IsSolid() == Standard_False)
+            aStatus = aScene.WriteLine("solid       FALSE");
+        if (OK(aStatus) && IsConvex() == Standard_False)
+            aStatus = aScene.WriteLine("convex      FALSE");
+        if (OK(aStatus) && CreaseAngle() > Precision::Confusion()) {
+            char buf[64];
+            Sprintf(buf, "%.9g", CreaseAngle());
+            aStatus = aScene.WriteLine("creaseAngle", buf);
         }
+
+        if (OK(aStatus) && myCoords.IsNull() == Standard_False)
+            aStatus = aScene.WriteNode("coord", myCoords);
+        if (OK(aStatus))
+            aStatus = aScene.WriteArrIndex("coordIndex", myArrPolygons, myNbPolygons);
+
+        if (OK(aStatus) && myNormalPerVertex == Standard_False)
+            aStatus = aScene.WriteLine("normalPerVertex FALSE");
+        if (OK(aStatus) && myNormals.IsNull() == Standard_False)
+            aStatus = aScene.WriteNode("normal", myNormals);
+        if (OK(aStatus))
+            aStatus = aScene.WriteArrIndex("normalIndex", myArrNormalInd, myNbNormals);
+
+        if (OK(aStatus) && myColorPerVertex == Standard_False)
+            aStatus = aScene.WriteLine("colorPerVertex  FALSE");
+        if (OK(aStatus) && myColors.IsNull() == Standard_False)
+            aStatus = aScene.WriteNode("color", myColors);
+        if (OK(aStatus))
+            aStatus = aScene.WriteArrIndex("colorIndex", myArrColorInd, myNbColors);
+
+        if (OK(aStatus) && myTxCoords.IsNull() == Standard_False)
+            aStatus = aScene.WriteNode("texCoord", myTxCoords);
+        if (OK(aStatus))
+            aStatus = aScene.WriteArrIndex("texCoordIndex", myArrTextureInd,
+                myNbTextures);
+
+        aStatus = WriteClosing();
     }
     return aStatus;
 }
+
+//=======================================================================
+//function : GetColor
+//purpose  : 
+//=======================================================================
+
+Quantity_Color VrmlData_IndexedFaceSet::GetColor
+(const Standard_Integer /*iFace*/,
+    const Standard_Integer /*iVertex*/)
+{
+    //TODO
+    return Quantity_NOC_BLACK;
+}
+
