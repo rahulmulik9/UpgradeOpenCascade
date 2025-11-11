@@ -1,912 +1,1369 @@
-// Created on: 2007-08-04
-// Created by: Alexander GRIGORIEV
-// Copyright (c) 2007-2014 OPEN CASCADE SAS
-//
-// This file is part of Open CASCADE Technology software library.
-//
-// This library is free software; you can redistribute it and/or modify it under
-// the terms of the GNU Lesser General Public License version 2.1 as published
-// by the Free Software Foundation, with special exception defined in the file
-// OCCT_LGPL_EXCEPTION.txt. Consult the file LICENSE_LGPL_21.txt included in OCCT
-// distribution for complete text of the license and disclaimer of any warranty.
-//
-// Alternatively, this file may be used under the terms of Open CASCADE
-// commercial license or contractual agreement.
-
-#include <VrmlData_ShapeConvert.hxx>
+#include "VrmlData_Node.hxx"
 #include <VrmlData_Scene.hxx>
+#include "VrmlData_InBuffer.hxx"
+#include <VrmlData_Appearance.hxx>
+#include <VrmlData_Box.hxx>
+#include <VrmlData_Color.hxx>
+#include <VrmlData_Cone.hxx>
+#include <VrmlData_Coordinate.hxx>
+#include <VrmlData_Cylinder.hxx>
+#include <VrmlData_DataMapOfShapeAppearance.hxx>
 #include <VrmlData_Group.hxx>
+#include <VrmlData_ImageTexture.hxx>
+#include <VrmlData_InBuffer.hxx>
 #include <VrmlData_IndexedFaceSet.hxx>
 #include <VrmlData_IndexedLineSet.hxx>
+#include <VrmlData_Material.hxx>
+#include <VrmlData_Normal.hxx>
+#include <VrmlData_Scene.hxx>
 #include <VrmlData_ShapeNode.hxx>
-#include <BRep_Builder.hxx>
-#include <BRep_Tool.hxx>
-#include <Geom_Surface.hxx>
-#include <NCollection_DataMap.hxx>
-#include <Poly_Triangulation.hxx>
-#include <Poly_Connect.hxx>
-#include <Poly_PolygonOnTriangulation.hxx>
-#include <Poly_Polygon3D.hxx>
-#include <TDataStd_Name.hxx>
-#include <TDF_Label.hxx>
-// #include <TDF_LabelSequence.hxx>
-#include <TDocStd_Document.hxx>
-#include <TopExp_Explorer.hxx>
+#include <VrmlData_Sphere.hxx>
+#include <VrmlData_TextureCoordinate.hxx>
+#include <VrmlData_UnknownNode.hxx>
+//#include <VrmlData_WorldInfo.hxx>
+#include <NCollection_Vector.hxx>
+#include <TopoDS_TFace.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
-#include <TopoDS_Shape.hxx>
-#include <TopoDS_Wire.hxx>
-#include <GCPnts_TangentialDeflection.hxx>
-#include <BRepAdaptor_Curve.hxx>
-#include <TColStd_Array1OfReal.hxx>
-#include <TColStd_HArray1OfReal.hxx>
-#include <GeomLib.hxx>
-#include <TShort_HArray1OfShortReal.hxx>
-#include <VrmlData_Appearance.hxx>
-#include <XCAFDoc_ColorTool.hxx>
-#include <XCAFDoc_DocumentTool.hxx>
-#include <XCAFDoc_ShapeTool.hxx>
-#include <XCAFPrs_Style.hxx>
-#include <XCAFDoc_VisMaterial.hxx>
-#include <XCAFDoc_VisMaterialTool.hxx>
+#include <TopExp_Explorer.hxx>
+#include <BRep_Builder.hxx>
+#include <Precision.hxx>
+#include <Standard_Version.hxx>
+#include <VrmlData_WorldInfo.hxx>
+#include <VrmlData_Geometry.hxx>
+#include "VrmlData_Proto.h"
+#include <Utils/Logger.h>
+#include <Macros.h>
+
+#ifdef _MSC_VER
+#define _CRT_SECURE_NO_DEPRECATE
+#pragma warning (disable:4996)
+#endif
+
+#define VRMLDATA_LCOMPARE_SKIP(aa, bb) (strncmp(aa, bb, sizeof(bb) - 1) == 0)
+#include <vector>
+#include <map>
+#include <algorithm>
+
+
+
+std::string trim(const std::string& str,
+    const std::string& whitespace = " \t")
+{
+    const auto strBegin = str.find_first_not_of(whitespace);
+    if (strBegin == std::string::npos)
+        return ""; // no content
+
+    const auto strEnd = str.find_last_not_of(whitespace);
+    const auto strRange = strEnd - strBegin + 1;
+
+    return str.substr(strBegin, strRange);
+}
+
+
+std::string getProtoNodeName(std::string str) {
+    std::stringstream stream(str);
+    str.clear();
+    stream >> str;
+    if (stream.str().find("DEF") != std::string::npos)
+        stream >> str;
+    return str;
+}
+
+static void dumpNode(Standard_OStream& theStream,
+    const Handle(VrmlData_Node)& theNode,
+    const TCollection_AsciiString& theIndent);
+
+static void dumpNodeHeader(Standard_OStream& theStream,
+    const TCollection_AsciiString& theIndent,
+    const char* theType,
+    const char* theName);
 
 //=================================================================================================
 
-void VrmlData_ShapeConvert::AddShape(const TopoDS_Shape& theShape, const char* theName)
+VrmlData_Scene::VrmlData_Scene(const Handle(NCollection_IncAllocator)& theAlloc)
+    : myLinearScale(1.),
+    myStatus(VrmlData_StatusOK),
+    myAllocator(theAlloc.IsNull() ? new NCollection_IncAllocator : theAlloc.operator->()),
+    myLineError(0),
+    myOutput(0L),
+    myIndent(2),
+    myCurrentIndent(0),
+    myAutoNameCounter(0)
 {
-    ShapeData aData; /* = { - compilation problem on SUN
-       TCollection_AsciiString(),
-       theShape,
-       NULL
-     };*/
-    aData.Shape = theShape;
-    aData.Node = NULL;
-
-    if (theName)
-    {
-        char  buf[2048], * optr = &buf[0];
-        char* eptr = &buf[sizeof(buf) - 1];
-        for (const char* ptr = theName;; ptr++)
-        {
-            char sym = *ptr;
-            if (sym == '\0' || sym == '\n' || sym == '\r')
-            {
-                *optr = '\0';
-                break;
-            }
-            if (sym == '\"' || sym == '\\')
-                *optr = '/';
-            else if (sym == '.')
-                *optr = '_';
-            else
-                *optr = sym;
-            if (++optr >= eptr)
-            {
-                *optr = '\0';
-                break;
-            }
-        }
-        aData.Name = buf;
-    }
-    myShapes.Append(aData);
+    myWorldInfo = new VrmlData_WorldInfo(*this);
+    Standard_CString anInfo = "Generated by Open CASCADE Technology " OCC_VERSION_STRING;
+    myWorldInfo->AddInfo(anInfo);
+    myLstNodes.Append(myWorldInfo);
+    myAllNodes.Append(myWorldInfo);
 }
 
 //=================================================================================================
 
-Handle(VrmlData_Geometry) VrmlData_ShapeConvert::makeTShapeNode(const TopoDS_Shape& theShape,
-    const TopAbs_ShapeEnum theShapeType,
-    TopLoc_Location& theLoc)
+const Handle(VrmlData_Node)& VrmlData_Scene::AddNode(const Handle(VrmlData_Node)& theN,
+    const Standard_Boolean       isTopLevel)
 {
-    Handle(VrmlData_Geometry) aTShapeNode = 0L;
-    const Standard_Boolean    isReverse = (theShape.Orientation() == TopAbs_REVERSED);
-
-    TopoDS_Shape aTestedShape;
-    aTestedShape.TShape(theShape.TShape());
-    aTestedShape.Orientation(isReverse ? TopAbs_REVERSED : TopAbs_FORWARD);
-    switch (theShapeType)
-    {
-    case TopAbs_FACE: {
-        const TopoDS_Face& aFace = TopoDS::Face(theShape);
-        if (aFace.IsNull() == Standard_False)
+    if (theN.IsNull() == Standard_False)
+        if (theN->IsKind(STANDARD_TYPE(VrmlData_WorldInfo)) == Standard_False)
         {
-            Handle(Poly_Triangulation) aTri = BRep_Tool::Triangulation(aFace, theLoc);
-
-            if (myRelMap.IsBound(aTestedShape))
-            {
-                aTShapeNode = myRelMap(aTestedShape);
-                break;
-            }
-
-            if (aTri.IsNull() == Standard_False)
-            {
-                TopoDS_Shape aTestedShapeRev = aTestedShape;
-                aTestedShapeRev.Orientation(isReverse ? TopAbs_FORWARD : TopAbs_REVERSED);
-                Handle(VrmlData_IndexedFaceSet) aFaceSetToReuse;
-                if (myRelMap.IsBound(aTestedShapeRev))
-                    aFaceSetToReuse = Handle(VrmlData_IndexedFaceSet)::DownCast(myRelMap(aTestedShapeRev));
-
-                Handle(VrmlData_Coordinate) aCoordToReuse;
-                if (aFaceSetToReuse.IsNull() == Standard_False)
-                    aCoordToReuse = aFaceSetToReuse->Coordinates();
-
-                aTShapeNode = triToIndexedFaceSet(aTri, aFace, aCoordToReuse);
-                myScene.AddNode(aTShapeNode, Standard_False);
-                // Bind the converted face
-                myRelMap.Bind(aTestedShape, aTShapeNode);
-            }
+            myMutex.Lock();
+            const Handle(VrmlData_Node)& aNode =
+                myAllNodes.Append((&theN->Scene() == this) ? theN : theN->Clone(NULL));
+            // Name is checked for uniqueness. If not, letter 'D' is appended until
+            // the name proves to be unique.
+            if (aNode->Name()[0] != '\0')
+                while (myNamedNodes.Add(aNode) == Standard_False)
+                    aNode->setName(aNode->Name(), "D");
+            if (isTopLevel)
+                myLstNodes.Append(aNode);
+            myMutex.Unlock();
+            return aNode;
         }
-    }
-                    break;
-    case TopAbs_WIRE: {
-        const TopoDS_Wire& aWire = TopoDS::Wire(theShape);
-        if (aWire.IsNull() == Standard_False)
-        {
-        }
-    }
-                    break;
-    case TopAbs_EDGE: {
-        const TopoDS_Edge& aEdge = TopoDS::Edge(theShape);
-        if (aEdge.IsNull() == Standard_False)
-        {
-            if (myRelMap.IsBound(aTestedShape))
-            {
-                aTShapeNode = myRelMap(aTestedShape);
-                break;
-            }
-            // Check the presence of reversly oriented Edge. It can also be used
-            // because we do not distinguish the orientation for edges.
-            aTestedShape.Orientation(isReverse ? TopAbs_FORWARD : TopAbs_REVERSED);
-            if (myRelMap.IsBound(aTestedShape))
-            {
-                aTShapeNode = myRelMap(aTestedShape);
-                break;
-            }
-
-            // try to find PolygonOnTriangulation
-            Handle(Poly_PolygonOnTriangulation) aPT;
-            Handle(Poly_Triangulation)          aT;
-            TopLoc_Location                     aL;
-            BRep_Tool::PolygonOnTriangulation(aEdge, aPT, aT, aL);
-
-            // If PolygonOnTriangulation was found -> get the Polygon3D
-            Handle(Poly_Polygon3D) aPol;
-            if (!aPT.IsNull() && !aT.IsNull() && aPT->HasParameters())
-            {
-                BRepAdaptor_Curve             aCurve(aEdge);
-                Handle(TColStd_HArray1OfReal) aPrs = aPT->Parameters();
-                Standard_Integer              nbNodes = aPT->NbNodes();
-                TColgp_Array1OfPnt            arrNodes(1, nbNodes);
-                TColStd_Array1OfReal          arrUVNodes(1, nbNodes);
-
-                for (Standard_Integer j = 1; j <= nbNodes; j++)
-                {
-                    arrUVNodes(j) = aPrs->Value(aPrs->Lower() + j - 1);
-                    arrNodes(j) = aCurve.Value(arrUVNodes(j));
-                }
-                aPol = new Poly_Polygon3D(arrNodes, arrUVNodes);
-                aPol->Deflection(aPT->Deflection());
-            }
-            else
-            {
-                aPol = BRep_Tool::Polygon3D(aEdge, aL);
-
-                // If polygon was not found -> generate it
-                if (aPol.IsNull())
-                {
-                    BRepAdaptor_Curve   aCurve(aEdge);
-                    const Standard_Real aFirst = aCurve.FirstParameter();
-                    const Standard_Real aLast = aCurve.LastParameter();
-
-                    GCPnts_TangentialDeflection TD(aCurve, aFirst, aLast, myDeflAngle, myDeflection, 2);
-                    const Standard_Integer      nbNodes = TD.NbPoints();
-
-                    TColgp_Array1OfPnt   arrNodes(1, nbNodes);
-                    TColStd_Array1OfReal arrUVNodes(1, nbNodes);
-                    for (Standard_Integer j = 1; j <= nbNodes; j++)
-                    {
-                        arrNodes(j) = TD.Value(j);
-                        arrUVNodes(j) = TD.Parameter(j);
-                    }
-                    aPol = new Poly_Polygon3D(arrNodes, arrUVNodes);
-                    aPol->Deflection(myDeflection);
-                }
-            }
-
-            if (!aPol.IsNull())
-            {
-                aTShapeNode = polToIndexedLineSet(aPol);
-                myScene.AddNode(aTShapeNode, Standard_False);
-                // Bind the converted face
-                myRelMap.Bind(aTestedShape, aTShapeNode);
-            }
-        }
-    }
-                    break;
-    default:
-        break;
-    }
-
-    return aTShapeNode;
+    static Handle(VrmlData_Node) aNullNode;
+    aNullNode.Nullify();
+    return aNullNode;
 }
 
-//=================================================================================================
+//=======================================================================
+// function : operator <<
+// purpose  : Export to text stream (file or else)
+//=======================================================================
 
-void VrmlData_ShapeConvert::Convert(const Standard_Boolean theExtractFaces,
-    const Standard_Boolean theExtractEdges,
-    const Standard_Real    theDeflection,
-    const Standard_Real    theDeflAngle)
+Standard_OStream& operator<<(Standard_OStream& theOutput, const VrmlData_Scene& theScene)
 {
-    // const Standard_Real aDeflection =
-    //   theDeflection < 0.0001 ? 0.0001 : theDeflection;
+    VrmlData_Scene& aScene = const_cast<VrmlData_Scene&>(theScene);
+    aScene.myMutex.Lock();
+    aScene.myCurrentIndent = 0;
+    aScene.myLineError = 0;
+    aScene.myOutput = 0L;
+    aScene.myNamedNodesOut.Clear();
+    aScene.myUnnamedNodesOut.Clear();
+    aScene.myAutoNameCounter = 0;
 
-    myDeflection = theDeflection < 0.0001 ? 0.0001 : theDeflection;
-    myDeflAngle = theDeflAngle;
+    // Dummy write
 
-    Standard_Boolean Extract[2] = { theExtractFaces, theExtractEdges };
-    TopAbs_ShapeEnum ShapeType[2] = { TopAbs_FACE, TopAbs_EDGE };
-    Standard_Integer i;
+    VrmlData_Scene::Iterator anIterD(aScene.myLstNodes);
+    for (; anIterD.More(); anIterD.Next())
+    {
+        const Handle(VrmlData_Node)& aNode = anIterD.Value();
+        if (aNode.IsNull() == Standard_False)
+        {
+            const VrmlData_ErrorStatus aStatus = aScene.WriteNode(0L, aNode);
+            if (aStatus != VrmlData_StatusOK && aStatus != VrmlData_NotImplemented)
+                break;
+        }
+    }
 
-    const Handle(NCollection_IncAllocator) anAlloc = new NCollection_IncAllocator;
+    aScene.myOutput = &theOutput;
+    aScene.myNamedNodesOut.Clear();
+    theOutput << "#VRML V2.0 utf8\n\n";
 
-    // Relocation map for converted shapes. We should distinguish both TShape
-    // and Orientation in this map.
-    // NCollection_DataMap <TopoDS_Shape,Handle(VrmlData_Geometry)>
-    //  aRelMap (100, anAlloc);
-    myRelMap = NCollection_DataMap<TopoDS_Shape, Handle(VrmlData_Geometry)>(100, anAlloc);
+    // Real write
 
-    NCollection_List<ShapeData>::Iterator anIter(myShapes);
+    VrmlData_Scene::Iterator anIter(aScene.myLstNodes);
     for (; anIter.More(); anIter.Next())
     {
-        ShapeData& aData = anIter.ChangeValue();
-        TCollection_AsciiString aGrName = aData.Name;
-        aGrName.ChangeAll(' ', '_');
-        aGrName.ChangeAll('#', '_');
-        Handle(VrmlData_Group) aGroup = new VrmlData_Group(myScene, aGrName.ToCString());
-        myScene.AddNode(aGroup);
-
-        for (i = 0; i < 2; ++i)
+        const Handle(VrmlData_Node)& aNode = anIter.Value();
+        if (aNode.IsNull() == Standard_False)
         {
-
-            if (!Extract[i])
-                continue;
-
-            TopExp_Explorer anExp(aData.Shape, ShapeType[i]);
-            for (; anExp.More(); anExp.Next())
-            {
-                const TopoDS_Shape& aShape = anExp.Current();
-                TopLoc_Location           aLoc;
-                Handle(VrmlData_Geometry) aTShapeNode = makeTShapeNode(aShape, ShapeType[i], aLoc);
-                if (!aTShapeNode.IsNull())
-                {
-                    const Handle(VrmlData_ShapeNode) aShapeNode = new VrmlData_ShapeNode(myScene, 0L);
-                    aShapeNode->SetAppearance(ShapeType[i] == TopAbs_FACE ? defaultMaterialFace()
-                        : defaultMaterialEdge());
-                    myScene.AddNode(aShapeNode, Standard_False);
-                    aShapeNode->SetGeometry(aTShapeNode);
-                    if (aLoc.IsIdentity())
-                        // Store the shape node directly into the main Group.
-                        aGroup->AddNode(aShapeNode);
-                    else
-                    {
-                        // Create a Transform grouping node
-                        Handle(VrmlData_Group) aTrans = new VrmlData_Group(myScene, 0L, Standard_True);
-                        gp_Trsf                aTrsf(aLoc);
-                        if (fabs(myScale - 1.) > Precision::Confusion())
-                        {
-                            const gp_XYZ aTransl = aTrsf.TranslationPart() * myScale;
-                            aTrsf.SetTranslationPart(aTransl);
-                        }
-                        aTrans->SetTransform(aTrsf);
-                        myScene.AddNode(aTrans, Standard_False);
-                        aGroup->AddNode(aTrans);
-
-                        // Store the shape node under the transform.
-                        aTrans->AddNode(aShapeNode);
-                    }
-                }
-            }
+            const VrmlData_ErrorStatus aStatus = aScene.WriteNode(0L, aNode);
+            if (aStatus != VrmlData_StatusOK && aStatus != VrmlData_NotImplemented)
+                break;
         }
     }
-    myShapes.Clear();
+    aScene.myOutput = 0L;
+    aScene.myNamedNodesOut.Clear();
+    aScene.myUnnamedNodesOut.Clear();
+    aScene.myMutex.Unlock();
+    return theOutput;
 }
 
 //=================================================================================================
 
-Handle(VrmlData_Geometry) VrmlData_ShapeConvert::triToIndexedFaceSet(
-    const Handle(Poly_Triangulation)& theTri,
-    const TopoDS_Face& theFace,
-    const Handle(VrmlData_Coordinate)& theCoord)
+void VrmlData_Scene::SetVrmlDir(const TCollection_ExtendedString& theDir)
 {
-    Standard_Integer       i;
-    const Standard_Integer nNodes(theTri->NbNodes());
-    const Standard_Integer nTriangles(theTri->NbTriangles());
-
-    // protection against creation degenerative triangles
-    Standard_Integer      nbTri = 0;
-    Poly_Array1OfTriangle aTriangles(1, nTriangles);
-    for (i = 0; i < nTriangles; i++)
+    TCollection_ExtendedString& aDir = myVrmlDir.Append(theDir);
+    if (aDir.IsEmpty())
     {
-        Standard_Integer idx[3];
-        theTri->Triangle(i + 1).Get(idx[0], idx[1], idx[2]);
-        if (idx[0] == idx[1] || idx[0] == idx[2] || idx[1] == idx[2])
+        return;
+    }
+    const Standard_ExtCharacter aTerminator = aDir.Value(aDir.Length());
+    if (aTerminator != Standard_ExtCharacter('\\') && aTerminator != Standard_ExtCharacter('/'))
+#ifdef _WIN32
+        aDir += TCollection_ExtendedString("\\");
+#else
+        aDir += TCollection_ExtendedString("/");
+#endif
+}
+
+//=================================================================================================
+
+const Handle(VrmlData_WorldInfo)& VrmlData_Scene::WorldInfo() const
+{
+    return myWorldInfo;
+}
+
+//=================================================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::readLine(VrmlData_InBuffer& theBuffer)
+{
+    VrmlData_ErrorStatus aStatus = VrmlData_StatusOK;
+    if (theBuffer.Input.eof())
+    {
+        return VrmlData_EndOfFile;
+    }
+    // Read a line.
+    theBuffer.Input.getline(theBuffer.Line, sizeof(theBuffer.Line));
+
+    // Check the number of read symbols.
+    // If maximum number is read, process the array of symbols separately
+    // rolling back the array to the last comma or space symbol.
+    std::streamsize aNbChars = theBuffer.Input.gcount();
+    if (theBuffer.Input.rdstate() & std::ios::failbit && aNbChars == sizeof(theBuffer.Line) - 1)
+    {
+        // Clear the error.
+        // We will fix it here below.
+        theBuffer.Input.clear();
+        size_t anInd = aNbChars - 1;
+        for (; anInd > 0; anInd--)
         {
+            Standard_Character aChar = theBuffer.Line[anInd];
+            if (aChar == ',' || aChar == ' ')
+            {
+                theBuffer.Line[anInd + 1] = '\0';
+                break;
+            }
+        }
+        if (anInd == 0) // no possible to rolling back
+        {
+            return VrmlData_UnrecoverableError;
+        }
+        theBuffer.Input.seekg(-static_cast<std::streamoff>((aNbChars - anInd - 1)), std::ios::cur);
+    }
+
+    // Check the reading status.
+    theBuffer.LineCount++;
+    const int stat = theBuffer.Input.rdstate();
+    if (stat & std::ios::badbit)
+    {
+        aStatus = VrmlData_UnrecoverableError;
+    }
+    else if (stat & std::ios::failbit)
+    {
+        if (stat & std::ios::eofbit)
+        {
+            aStatus = VrmlData_EndOfFile;
+        }
+        else
+        {
+            aStatus = VrmlData_GeneralError;
+        }
+    }
+    theBuffer.LinePtr = &theBuffer.Line[0];
+    theBuffer.IsProcessed = Standard_False;
+    return aStatus;
+}
+
+//=================================================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::ReadLine(VrmlData_InBuffer& theBuffer)
+{
+    VrmlData_ErrorStatus aStatus(VrmlData_StatusOK);
+
+    while (aStatus == VrmlData_StatusOK)
+    {
+        // Find the first significant character of the line
+        for (; *theBuffer.LinePtr != '\0'; theBuffer.LinePtr++)
+        {
+            if (*theBuffer.LinePtr != ' ' && *theBuffer.LinePtr != '\t' && *theBuffer.LinePtr != ',')
+            {
+                if (*theBuffer.LinePtr == '\n' || *theBuffer.LinePtr == '\r' || *theBuffer.LinePtr == '#')
+                    // go requesting the next line
+                    break;
+                goto nonempty_line;
+            }
+        }
+        // the line is empty here (no significant characters). Read the next one.
+        aStatus = readLine(theBuffer);
+    }
+
+    // error or EOF detected
+    return aStatus;
+
+nonempty_line:
+    // Try to detect comment
+    if (theBuffer.IsProcessed == Standard_False)
+    {
+        Standard_Boolean isQuoted(Standard_False);
+        Standard_Integer anOffset(0);
+        char* ptr = theBuffer.LinePtr;
+        for (; *ptr != '\0'; ptr++)
+        {
+            if (anOffset)
+                *ptr = ptr[anOffset];
+            if (*ptr == '\n' || *ptr == '\r' || *ptr == '#')
+            {
+                if (isQuoted == Standard_False)
+                {
+                    *ptr = '\0';
+                    break;
+                }
+            }
+            else if (*ptr == '\\' && isQuoted)
+                ptr[0] = ptr[++anOffset];
+            else if (*ptr == '\"')
+                isQuoted = !isQuoted;
+        }
+        theBuffer.IsProcessed = Standard_True;
+    }
+    return aStatus;
+}
+
+//=================================================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::readHeader(VrmlData_InBuffer& theBuffer)
+{
+    VrmlData_ErrorStatus aStat = readLine(theBuffer);
+    if (aStat != VrmlData_StatusOK)
+    {
+        return VrmlData_NotVrmlFile;
+    }
+    TCollection_AsciiString aHeader(theBuffer.LinePtr);
+    // The max possible header size is 25 (with spaces)
+    // 4 (max BOM size) + 11 (search string) + 9 (max size for encoding)
+    if (aHeader.Length() <= 25 && aHeader.Search("#VRML V2.0") != -1)
+    {
+        aStat = readLine(theBuffer);
+    }
+    else
+    {
+        aStat = VrmlData_NotVrmlFile;
+    }
+    return aStat;
+}
+
+//=======================================================================
+// function : operator <<
+// purpose  : Import from text stream (file or else)
+//=======================================================================
+
+VrmlData_Scene& VrmlData_Scene::operator<<(Standard_IStream& theInput)
+{
+    VrmlData_InBuffer aBuffer(theInput);
+    myMutex.Lock();
+    // Read the VRML header
+    myStatus = readHeader(aBuffer);
+    const Handle(VrmlData_UnknownNode) aNullNode = new VrmlData_UnknownNode(*this);
+    //   if (myStatus == StatusOK)
+    //     myStatus = ReadLine (aBuffer);
+    // Read VRML data by nodes
+    for (;;)
+    {
+        if (!VrmlData_Node::OK(myStatus, ReadLine(aBuffer)))
+        {
+            if (myStatus == VrmlData_EndOfFile)
+                myStatus = VrmlData_StatusOK;
+            break;
+        }
+        // this line provides the method ReadNode in the present context
+        Handle(VrmlData_Node) aNode;
+        if (VRMLDATA_LCOMPARE(aBuffer.LinePtr, "ROUTE")) {
+            LOG_INFO("Skipping ROUTE node...");
+            //aBuffer.Input.ignore('\n');
+            //continue;
+            readLine(aBuffer);
             continue;
         }
-        nbTri++;
-        aTriangles.SetValue(nbTri, theTri->Triangle(i + 1));
-    }
-    aTriangles.Resize(1, nbTri, Standard_True);
-
-    const Handle(VrmlData_IndexedFaceSet) aFaceSet =
-        new VrmlData_IndexedFaceSet(myScene,
-            0L,              // no name
-            Standard_True,   // IsCCW
-            Standard_False,  // IsSolid
-            Standard_False); // IsConvex
-    const Handle(NCollection_IncAllocator)& anAlloc = myScene.Allocator();
-    const Standard_Boolean                  isReverse = (theFace.Orientation() == TopAbs_REVERSED);
-
-    // Create the array of triangles
-    const Standard_Integer** arrPolygons = static_cast<const Standard_Integer**>(
-        anAlloc->Allocate(nbTri * sizeof(const Standard_Integer*)));
-    aFaceSet->SetPolygons(nbTri, arrPolygons);
-
-    // Store the triangles
-    for (i = 0; i < nbTri; i++)
-    {
-        Standard_Integer* aPolygon =
-            static_cast<Standard_Integer*>(anAlloc->Allocate(4 * sizeof(Standard_Integer)));
-        aPolygon[0] = 3;
-        aTriangles(i + 1).Get(aPolygon[1], aPolygon[2], aPolygon[3]);
-        aPolygon[1]--;
-        if (isReverse)
+        myStatus = aNullNode->ReadNode(aBuffer, aNode);
+        // Unknown nodes are not stored however they do not generate error
+        if (myStatus != VrmlData_StatusOK)
+            break;
+        if (aNode.IsNull() == Standard_False /*&&
+            !aNode->IsKind (STANDARD_TYPE(VrmlData_UnknownNode))*/)
         {
-            const Standard_Integer aTmp = aPolygon[2] - 1;
-            aPolygon[2] = aPolygon[3] - 1;
-            aPolygon[3] = aTmp;
+            if (aNode->IsKind(STANDARD_TYPE(VrmlData_WorldInfo)) == Standard_False)
+                myLstNodes.Append(aNode);
+            else if (aNode->IsDefault() == Standard_False)
+            {
+                const Handle(VrmlData_WorldInfo) aInfo = Handle(VrmlData_WorldInfo)::DownCast(aNode);
+                myWorldInfo->SetTitle(aInfo->Title());
+                NCollection_List<const char*>::Iterator anIterInfo = aInfo->InfoIterator();
+                for (; anIterInfo.More(); anIterInfo.Next())
+                    myWorldInfo->AddInfo(anIterInfo.Value());
+            }
         }
+    }
+    if (myStatus != VrmlData_StatusOK)
+        myLineError = aBuffer.LineCount;
+    myMutex.Unlock();
+    return *this;
+}
+
+//=================================================================================================
+
+Handle(VrmlData_Node) VrmlData_Scene::FindNode(const char* theName,
+    const Handle(Standard_Type)& /*theType*/) const
+{
+    Handle(VrmlData_Node) aResult;
+#ifdef USE_LIST_API
+    Iterator anIter(myAllNodes);
+    for (; anIter.More(); anIter.Next())
+        if (!strcmp(anIter.Value()->Name(), theName))
+        {
+            aResult = anIter.Value();
+            if (theType.IsNull())
+                break;
+            if (aResult->IsKind(theType))
+                break;
+            aResult.Nullify();
+        }
+#else
+    const Handle(VrmlData_UnknownNode) aDummyNode = new VrmlData_UnknownNode;
+    aDummyNode->myName = theName;
+    if (myNamedNodes.Contains(aDummyNode))
+        aResult = const_cast<VrmlData_MapOfNode&>(myNamedNodes).Added(aDummyNode);
+#endif
+    return aResult;
+}
+
+//=================================================================================================
+
+Handle(VrmlData_Node) VrmlData_Scene::FindNode(const char* theName, gp_Trsf& theLocation) const
+{
+    gp_Trsf               aLoc;
+    Handle(VrmlData_Node) aResult;
+    Iterator              anIter(myLstNodes);
+    for (; anIter.More(); anIter.Next())
+    {
+        const Handle(VrmlData_Node)& aNode = anIter.Value();
+        if (aNode.IsNull())
+            continue;
+        // Match a top-level node name
+        if (strcmp(aNode->Name(), theName) == 0)
+        {
+            aResult = aNode;
+            theLocation = aLoc;
+            break;
+        }
+        // Try a Group type of node
+        if (aNode->IsKind(STANDARD_TYPE(VrmlData_Group)))
+        {
+            const Handle(VrmlData_Group) aGroup = Handle(VrmlData_Group)::DownCast(aNode);
+            if (aGroup.IsNull() == Standard_False)
+            {
+                aResult = aGroup->FindNode(theName, theLocation);
+                if (aResult.IsNull() == Standard_False)
+                    break;
+            }
+        }
+    }
+    return aResult;
+}
+
+//=================================================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::ReadWord(VrmlData_InBuffer& theBuffer,
+    TCollection_AsciiString& theWord)
+{
+    VrmlData_ErrorStatus aStatus = ReadLine(theBuffer);
+    if (aStatus == VrmlData_StatusOK)
+    {
+        char* ptr = theBuffer.LinePtr;
+        while (*ptr != '\0' && *ptr != '\n' && *ptr != '\r' && *ptr != ' ' && *ptr != '\t'
+            && *ptr != '{' && *ptr != '}' && *ptr != ',' && *ptr != '[' && *ptr != ']')
+            ptr++;
+        const Standard_Integer aLen = Standard_Integer(ptr - theBuffer.LinePtr);
+        if (aLen <= 0)
+            aStatus = VrmlData_StringInputError;
         else
         {
-            aPolygon[2]--;
-            aPolygon[3]--;
+            theWord = TCollection_AsciiString((Standard_CString)theBuffer.LinePtr, aLen);
+            theBuffer.LinePtr = ptr;
         }
-        arrPolygons[i] = aPolygon;
+    }
+    return aStatus;
+}
+
+//=================================================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::createNode(VrmlData_InBuffer& theBuffer,
+    Handle(VrmlData_Node)& theNode,
+    const Handle(Standard_Type)& theType)
+{
+    VrmlData_ErrorStatus    aStatus;
+    Handle(VrmlData_Node)   aNode;
+    TCollection_AsciiString aName;
+    bool isProto = false;
+    bool isDef = false;
+    // Read the DEF token to assign the node name
+    if (VrmlData_Node::OK(aStatus, ReadLine(theBuffer)))
+    {
+        if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "DEF"))
+        {
+            if (VrmlData_Node::OK(aStatus, ReadWord(theBuffer, aName)))
+                aStatus = ReadLine(theBuffer);
+        }
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "NULL"))
+        {
+            theNode.Nullify();
+            return aStatus;
+        }
     }
 
-    // Create the Coordinates node
-    if (theCoord.IsNull() == Standard_False)
-        aFaceSet->SetCoordinates(theCoord);
-    else
-    {
-        gp_XYZ* arrNodes = static_cast<gp_XYZ*>(anAlloc->Allocate(nNodes * sizeof(gp_XYZ)));
-        for (i = 0; i < nNodes; i++)
-        {
-            arrNodes[i] = theTri->Node(i + 1).XYZ() * myScale;
-        }
-
-        const Handle(VrmlData_Coordinate) aCoordNode =
-            new VrmlData_Coordinate(myScene, 0L, nNodes, arrNodes);
-        myScene.AddNode(aCoordNode, Standard_False);
-        aFaceSet->SetCoordinates(aCoordNode);
-    }
-
-    // Create the Normals node if theTri has normals
-    if (theTri->HasNormals())
-    {
-        gp_XYZ* arrVec = static_cast<gp_XYZ*>(anAlloc->Allocate(nNodes * sizeof(gp_XYZ)));
-        gp_Vec3f aVec3;
-        for (i = 0; i < nNodes; i++)
-        {
-            theTri->Normal(i + 1, aVec3);
-            gp_XYZ aNormal(aVec3.x(), aVec3.y(), aVec3.z());
-            if (isReverse)
-            {
-                aNormal.Reverse();
+    static bool protoNode = false;
+    static std::vector<TCollection_AsciiString> objs;
+    const char* strName = aName.ToCString();
+    const char* grpName = strName;
+    if (aStatus == VrmlData_StatusOK) {
+        std::string str(theBuffer.LinePtr);
+        str = trim((str));
+        std::stringstream strm;
+        strm << str;
+        str.clear();
+        strm >> str;
+        static std::string shpName;
+        if (std::count(VrmlData_Proto::protos.begin(), VrmlData_Proto::protos.end(), str.c_str())) {
+            shpName = theBuffer.Line;
+            shpName = getProtoNodeName(shpName);
+            std::string tpename = aNode->get_type_name();
+            aNode = VrmlData_Proto::nodes[str.c_str()];
+            aNode->setName(shpName.c_str());
+            protoNode = true;
+            aNode->Process(theBuffer, aNode, false);
+            VrmlData_Proto::IsProtoNode = true;
+            if (aNode.IsNull() == Standard_False) {
+                myAllNodes.Append(aNode);
+                myNamedNodes.Add(aNode);
             }
-            arrVec[i] = aNormal;
+            protoNode = false;
+            std::string brack = theBuffer.LinePtr;
+            while (trim(brack) == "}") {
+                theBuffer.LinePtr++;
+                brack = theBuffer.LinePtr;
+            }
+            theNode = aNode;
+            return VrmlData_StatusOK;
         }
-        const Handle(VrmlData_Normal) aNormalNode = new VrmlData_Normal(myScene, 0L, nNodes, arrVec);
-        myScene.AddNode(aNormalNode, Standard_False);
-        aFaceSet->SetNormals(aNormalNode);
-        return Handle(VrmlData_Geometry)(aFaceSet);
-    }
-
-    Poly_Connect PC(theTri);
-    // Create the Normals node (if UV- values are available)
-    TopLoc_Location            aLoc;
-    constexpr Standard_Real    aConf2 = Precision::SquareConfusion();
-    const Handle(Geom_Surface) aSurface = BRep_Tool::Surface(theFace, aLoc);
-    if (theTri->HasUVNodes() && aSurface.IsNull() == Standard_False)
-    {
-        if (aSurface->IsCNu(1) && aSurface->IsCNv(1))
+        if (protoNode) {
+            grpName = shpName.c_str();
+        }
+        // create the new node
+        if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Appearance"))
+            aNode = new VrmlData_Appearance(*this, strName);
+        else if (!VRMLDATA_LCOMPARE_SKIP(theBuffer.LinePtr, "ShapeHints")
+            && VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Shape"))
+            aNode = new VrmlData_ShapeNode(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Box"))
+            aNode = new VrmlData_Box(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Color"))
+            aNode = new VrmlData_Color(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Cone"))
+            aNode = new VrmlData_Cone(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "CoordinateInterpolator")) {
+            VrmlData_ErrorStatus theStatus;
+            while (VrmlData_Node::OK(theStatus, VrmlData_Scene::ReadLine(theBuffer))) {
+                // read the end-of-list bracket
+                if (theBuffer.LinePtr[0] == '}') {
+                    readLine(theBuffer);
+                    return VrmlData_StatusOK;
+                }
+                else {
+                    readLine(theBuffer);
+                    continue;
+                }
+            }
+        }
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Coordinate"))
         {
-            gp_XYZ* arrVec = static_cast<gp_XYZ*>(anAlloc->Allocate(nNodes * sizeof(gp_XYZ)));
+            aNode = new VrmlData_Coordinate(*this, strName);
 
-            // Compute the normal vectors
-            Standard_Real Tol = Sqrt(aConf2);
-            for (i = 0; i < nNodes; i++)
-            {
-                const gp_Pnt2d aUV = theTri->UVNode(i + 1);
-                gp_Dir         aNormal;
-                if (GeomLib::NormEstim(aSurface, aUV, Tol, aNormal) > 1)
-                {
-                    // Try to estimate as middle normal of adjacent triangles
-                    Standard_Integer n[3];
-
-                    gp_XYZ eqPlan(0., 0., 0.);
-                    for (PC.Initialize(i + 1); PC.More(); PC.Next())
-                    {
-                        aTriangles(PC.Value()).Get(n[0], n[1], n[2]);
-                        gp_XYZ v1(theTri->Node(n[1]).Coord() - theTri->Node(n[0]).Coord());
-                        gp_XYZ v2(theTri->Node(n[2]).Coord() - theTri->Node(n[1]).Coord());
-                        gp_XYZ vv = v1 ^ v2;
-
-                        Standard_Real mod = vv.Modulus();
-                        if (mod < Tol)
-                            continue;
-
-                        eqPlan += vv / mod;
+            // Check for "Coordinate3"
+            if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "3"))
+                theBuffer.LinePtr++;
+        }
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Cylinder"))
+            aNode = new VrmlData_Cylinder(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Group"))
+            aNode = new VrmlData_Group(*this, grpName,
+                Standard_False);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Anchor"))
+            aNode = new VrmlData_Group(*this, strName,
+                Standard_False);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Transform"))
+            aNode = new VrmlData_Group(*this, strName, Standard_True);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Inline"))
+            aNode = new VrmlData_Group(*this, strName, Standard_False);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Separator"))
+            aNode = new VrmlData_Group(*this, strName, Standard_False);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Collision"))
+            aNode = new VrmlData_Group(*this, strName, Standard_False);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Switch"))
+            aNode = new VrmlData_Group(*this, strName, Standard_False);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "ImageTexture"))
+            aNode = new VrmlData_ImageTexture(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "IndexedFaceSet"))
+            aNode = new VrmlData_IndexedFaceSet(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "IndexedLineSet"))
+            aNode = new VrmlData_IndexedLineSet(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Material"))
+            aNode = new VrmlData_Material(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Normal"))
+            aNode = new VrmlData_Normal(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Sphere"))
+            aNode = new VrmlData_Sphere(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "TextureCoordinate"))
+            aNode = new VrmlData_TextureCoordinate(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "WorldInfo"))
+            aNode = new VrmlData_WorldInfo(*this, strName);
+        else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "EXTERNPROTO")) {
+            LOG_INFO("Skipping EXTERNPROTO node {}.....", theBuffer.LinePtr);
+            TCollection_AsciiString aTitle;
+            aStatus = ReadWord(theBuffer, aTitle);
+            aStatus = ReadLine(theBuffer);
+            if (aStatus == VrmlData_StatusOK) {
+                if (theBuffer.LinePtr[0] != '[')
+                    aStatus = VrmlData_VrmlFormatError;
+                else {
+                    theBuffer.LinePtr++;
+                    Standard_Integer aLevelCounter(0);
+                    // This loop searches for any opening bracket '['.
+                    // Such bracket increments the level counter. A closing bracket decrements
+                    // the counter. The loop terminates when the counter becomes negative.
+                    while (aLevelCounter >= 0 &&
+                        (aStatus = ReadLine(theBuffer)) == VrmlData_StatusOK) {
+                        int aChar;
+                        while ((aChar = theBuffer.LinePtr[0]) != '\0') {
+                            theBuffer.LinePtr++;
+                            if (aChar == '[') {
+                                aLevelCounter++;
+                                break;
+                            }
+                            else if (aChar == ']') {
+                                aLevelCounter--;
+                                break;
+                            }
+                        }
                     }
-
-                    if (eqPlan.SquareModulus() > gp::Resolution())
-                        aNormal = gp_Dir(eqPlan);
+                    //theBuffer.LinePtr++;
                 }
-                if (isReverse)
-                    aNormal.Reverse();
-
-                if (aNormal.X() * aNormal.X() < aConf2)
-                    aNormal.SetX(0.);
-                if (aNormal.Y() * aNormal.Y() < aConf2)
-                    aNormal.SetY(0.);
-                if (aNormal.Z() * aNormal.Z() < aConf2)
-                    aNormal.SetZ(0.);
-
-                arrVec[i] = aNormal.XYZ();
             }
-
-            const Handle(VrmlData_Normal) aNormalNode = new VrmlData_Normal(myScene, 0L, nNodes, arrVec);
-            myScene.AddNode(aNormalNode, Standard_False);
-            aFaceSet->SetNormals(aNormalNode);
+            ReadLine(theBuffer);
+            if (theBuffer.LinePtr) {
+                if (theBuffer.LinePtr[0] == '[') {
+                    while (theBuffer.LinePtr[0] != ']') {
+                        theBuffer.LinePtr++;
+                        if (theBuffer.LinePtr[0] == '\n' || theBuffer.LinePtr[0] == '\0') {
+                            ReadLine(theBuffer);
+                            break;
+                        }
+                    }
+                    theBuffer.LinePtr++;
+                }
+            }
+            return VrmlData_StatusOK;
+        }
+        else {
+            isProto = VRMLDATA_LCOMPARE(theBuffer.LinePtr, "PROTO");
+            //aNode = new VrmlData_Proto(*this, strName);
+            TCollection_AsciiString aTitle;
+            aStatus = ReadWord(theBuffer, aTitle);
+            if (isProto) {
+                Handle(VrmlData_Proto) node = new VrmlData_Proto(*this, aTitle);
+                VrmlData_Proto::protos.push_back(aTitle);
+                VrmlData_Proto::nodes[aTitle] = node;
+                aNode = node;
+            }
+            else {
+                LOG_INFO("Skipping unknown node {}.....", aTitle.ToCString());
+                aNode = new VrmlData_UnknownNode(*this,
+                    strName,
+                    aTitle.ToCString());
+            }
         }
     }
-
-    return Handle(VrmlData_Geometry)(aFaceSet);
-}
-
-//=======================================================================
-// function : polToIndexedLineSet
-// purpose  : single polygon3D => IndexedLineSet
-//=======================================================================
-
-Handle(VrmlData_Geometry) VrmlData_ShapeConvert::polToIndexedLineSet(
-    const Handle(Poly_Polygon3D)& thePol)
-{
-    Standard_Integer                        i;
-    const Standard_Integer                  nNodes(thePol->NbNodes());
-    const TColgp_Array1OfPnt& arrPolyNodes = thePol->Nodes();
-    const Handle(NCollection_IncAllocator)& anAlloc = myScene.Allocator();
-
-    const Handle(VrmlData_IndexedLineSet) aLineSet = new VrmlData_IndexedLineSet(myScene, 0L);
-
-    // Create the array of polygons (1 member)
-    const Standard_Integer** arrPolygons =
-        static_cast<const Standard_Integer**>(anAlloc->Allocate(sizeof(const Standard_Integer*)));
-    aLineSet->SetPolygons(1, arrPolygons);
-
-    // Store the polygon
-    Standard_Integer* aPolygon =
-        static_cast<Standard_Integer*>(anAlloc->Allocate((nNodes + 1) * sizeof(Standard_Integer)));
-    aPolygon[0] = nNodes;
-    for (i = 1; i <= nNodes; i++)
-        aPolygon[i] = i - 1;
-    arrPolygons[0] = aPolygon;
-
-    // Create the Coordinates node
-    gp_XYZ* arrNodes = static_cast<gp_XYZ*>(anAlloc->Allocate(nNodes * sizeof(gp_XYZ)));
-    for (i = 0; i < nNodes; i++)
-        arrNodes[i] = arrPolyNodes(i + 1).XYZ() * myScale;
-
-    const Handle(VrmlData_Coordinate) aCoordNode =
-        new VrmlData_Coordinate(myScene, 0L, nNodes, arrNodes);
-    myScene.AddNode(aCoordNode, Standard_False);
-    aLineSet->SetCoordinates(aCoordNode);
-
-    return Handle(VrmlData_Geometry)(aLineSet);
-}
-
-//=================================================================================================
-
-Handle(VrmlData_Appearance) VrmlData_ShapeConvert::defaultMaterialFace() const
-{
-    static char                 aNodeName[] = "__defaultMaterialFace";
-    Handle(VrmlData_Appearance) anAppearance =
-        Handle(VrmlData_Appearance)::DownCast(myScene.FindNode(aNodeName));
-    if (anAppearance.IsNull())
+    aStatus = ReadLine(theBuffer);
+    if (aNode.IsNull() == Standard_False)
     {
-        const Handle(VrmlData_Material) aMaterial = new VrmlData_Material(myScene, 0L, 1.0, 0.022, 0.);
-        aMaterial->SetDiffuseColor(Quantity_Color(0.780392, 0.568627, 0.113725, Quantity_TOC_sRGB));
-        aMaterial->SetEmissiveColor(Quantity_Color(0.329412, 0.223529, 0.027451, Quantity_TOC_sRGB));
-        aMaterial->SetSpecularColor(Quantity_Color(0.992157, 0.941176, 0.807843, Quantity_TOC_sRGB));
-        myScene.AddNode(aMaterial, Standard_False);
-        anAppearance = new VrmlData_Appearance(myScene, aNodeName);
-        anAppearance->SetMaterial(aMaterial);
-        myScene.AddNode(anAppearance, Standard_False);
+        if (aNode->Name()[0] != '\0')
+            myNamedNodes.Add(aNode);
+        if (theType.IsNull() == Standard_False)
+            if (aNode->IsKind(theType) == Standard_False)
+                aStatus = VrmlData_VrmlFormatError;
     }
-    return anAppearance;
-}
-
-//=================================================================================================
-
-Handle(VrmlData_Appearance) VrmlData_ShapeConvert::defaultMaterialEdge() const
-{
-    static char                 aNodeName[] = "__defaultMaterialEdge";
-    Handle(VrmlData_Appearance) anAppearance =
-        Handle(VrmlData_Appearance)::DownCast(myScene.FindNode(aNodeName));
-    if (anAppearance.IsNull())
-    {
-        const Handle(VrmlData_Material) aMaterial = new VrmlData_Material(myScene, 0L, 0.2, 0.2, 0.2);
-        aMaterial->SetDiffuseColor(Quantity_Color(0.2, 0.7, 0.2, Quantity_TOC_RGB));
-        aMaterial->SetEmissiveColor(Quantity_Color(0.2, 0.7, 0.2, Quantity_TOC_RGB));
-        aMaterial->SetSpecularColor(Quantity_Color(0.2, 0.7, 0.2, Quantity_TOC_RGB));
-        myScene.AddNode(aMaterial, Standard_False);
-        anAppearance = new VrmlData_Appearance(myScene, aNodeName);
-        anAppearance->SetMaterial(aMaterial);
-        myScene.AddNode(anAppearance, Standard_False);
+    if (isProto) {
+        theNode = aNode;
+        return VrmlData_StatusOK;
     }
-    return anAppearance;
-}
-
-//=======================================================================
-// function : addShape
-// purpose  : Adds the shape from the document
-//=======================================================================
-void VrmlData_ShapeConvert::addShape(const Handle(VrmlData_Group)& theParent,
-    const TDF_Label& theLabel,
-    const Handle(TDocStd_Document)& theDoc)
-{
-    Handle(XCAFDoc_ShapeTool)       aShapeTool = XCAFDoc_DocumentTool::ShapeTool(theDoc->Main());
-    Handle(XCAFDoc_ColorTool)       aColorTool = XCAFDoc_DocumentTool::ColorTool(theDoc->Main());
-    Handle(XCAFDoc_VisMaterialTool) aMatTool = XCAFDoc_DocumentTool::VisMaterialTool(theDoc->Main());
-
-    NCollection_DataMap<TopoDS_Shape, TDF_Label> aChildShapeToLabels;
-    TDF_LabelSequence                            aChildLabels;
-    aShapeTool->GetSubShapes(theLabel, aChildLabels);
-    for (TDF_LabelSequence::Iterator aChildIter(aChildLabels); aChildIter.More(); aChildIter.Next())
+    if (aStatus == VrmlData_StatusOK)
     {
-        const TDF_Label& aChildLabel = aChildIter.Value();
-        TopoDS_Shape     aChildShape;
-        if (aShapeTool->GetShape(aChildLabel, aChildShape))
+        if (theBuffer.LinePtr[0] == '{')
         {
-            aChildShapeToLabels.Bind(aChildShape, aChildLabel);
-        }
-    }
-
-    const TopoDS_Shape     aShape = aShapeTool->GetShape(theLabel);
-    Handle(VrmlData_Group) aGroup = 0L;
-    TopExp_Explorer        anExp(aShape, TopAbs_FACE);
-    Standard_Integer       nbFaces = 0;
-    for (; anExp.More(); anExp.Next())
-    {
-        nbFaces++;
-    }
-    Handle(TDataStd_Name) aNameAttribute;
-    theLabel.FindAttribute(TDataStd_Name::GetID(), aNameAttribute);
-    if (nbFaces > 1)
-    {
-        if (!aNameAttribute.IsNull())
-        {
-            TCollection_AsciiString aName = aNameAttribute->Get();
-            aName.ChangeAll(' ', '_');
-            aName.ChangeAll('#', '_');
-            aGroup = new VrmlData_Group(myScene, aName.ToCString());
+            theBuffer.LinePtr++;
+            theNode = aNode;
+            myAllNodes.Append(aNode);
         }
         else
         {
-            aGroup = new VrmlData_Group(myScene, 0L);
-        }
-        myScene.AddNode(aGroup, theParent.IsNull());
-        if (!theParent.IsNull())
-        {
-            theParent->AddNode(aGroup);
+            aStatus = VrmlData_VrmlFormatError;
         }
     }
-
-    anExp.Init(aShape, TopAbs_FACE);
-    for (; anExp.More(); anExp.Next())
-    {
-        TopLoc_Location           aLoc;
-        Handle(VrmlData_Geometry) aTShapeNode = makeTShapeNode(anExp.Current(), TopAbs_FACE, aLoc);
-        if (!aTShapeNode.IsNull())
-        {
-            Handle(VrmlData_ShapeNode) aShapeNode = 0L;
-            if (aGroup.IsNull() && !aNameAttribute.IsNull())
-            {
-                TCollection_AsciiString aName = aNameAttribute->Get();
-                aName.ChangeAll(' ', '_');
-                aName.ChangeAll('#', '_');
-                aShapeNode = new VrmlData_ShapeNode(myScene, aName.ToCString());
-            }
-            else
-            {
-                aShapeNode = new VrmlData_ShapeNode(myScene, 0L);
-            }
-
-            // set color
-            XCAFPrs_Style      aStyle;
-            Quantity_ColorRGBA aColor;
-            TDF_Label          aLabel, anAttribLab;
-            if (aChildShapeToLabels.Find(anExp.Current(), aLabel))
-            {
-                Handle(XCAFDoc_VisMaterial) aVisMat = aMatTool->GetShapeMaterial(aLabel);
-                if (!aVisMat.IsNull() && !aVisMat->IsEmpty())
-                {
-                    anAttribLab = aVisMat->Label();
-                    aStyle.SetMaterial(aVisMat);
-                }
-                else if (aColorTool->GetColor(aLabel, XCAFDoc_ColorSurf, anAttribLab)
-                    || aColorTool->GetColor(aLabel, XCAFDoc_ColorGen, anAttribLab))
-                {
-                    aColorTool->GetColor(anAttribLab, aColor);
-                    aStyle.SetColorSurf(aColor);
-                }
-            }
-            if (!aStyle.IsSetColorSurf() && aStyle.Material().IsNull())
-            {
-                Handle(XCAFDoc_VisMaterial) aVisMat = aMatTool->GetShapeMaterial(theLabel);
-                if (!aVisMat.IsNull() && !aVisMat->IsEmpty())
-                {
-                    anAttribLab = aVisMat->Label();
-                    aStyle.SetMaterial(aVisMat);
-                }
-                if (aColorTool->GetColor(theLabel, XCAFDoc_ColorSurf, anAttribLab)
-                    || aColorTool->GetColor(theLabel, XCAFDoc_ColorGen, anAttribLab))
-                {
-                    aColorTool->GetColor(anAttribLab, aColor);
-                    aStyle.SetColorSurf(aColor);
-                }
-            }
-            if (!aStyle.IsSetColorSurf() && aStyle.Material().IsNull())
-            {
-                aShapeNode->SetAppearance(defaultMaterialFace());
-            }
-            else
-            {
-                aShapeNode->SetAppearance(makeMaterialFromStyle(aStyle, anAttribLab));
-            }
-
-            myScene.AddNode(aShapeNode, theParent.IsNull() && aGroup.IsNull());
-            aShapeNode->SetGeometry(aTShapeNode);
-            if (aLoc.IsIdentity())
-            {
-                // Store the shape node directly into the main Group.
-                if (!aGroup.IsNull())
-                {
-                    aGroup->AddNode(aShapeNode);
-                }
-                else if (!theParent.IsNull())
-                {
-                    theParent->AddNode(aShapeNode);
-                }
-            }
-            else
-            {
-                // Create a Transform grouping node
-                Handle(VrmlData_Group) aTrans = new VrmlData_Group(myScene, 0L, Standard_True);
-                gp_Trsf                aTrsf(aLoc);
-                if (fabs(myScale - 1.) > Precision::Confusion())
-                {
-                    const gp_XYZ aTransl = aTrsf.TranslationPart() * myScale;
-                    aTrsf.SetTranslationPart(aTransl);
-                }
-                aTrans->SetTransform(aTrsf);
-                myScene.AddNode(aTrans, theParent.IsNull() && aGroup.IsNull());
-                if (!aGroup.IsNull())
-                {
-                    aGroup->AddNode(aTrans);
-                }
-                else if (!theParent.IsNull())
-                {
-                    theParent->AddNode(aTrans);
-                }
-                // Store the shape node under the transform.
-                aTrans->AddNode(aShapeNode);
-            }
-        }
-    }
+    return aStatus;
 }
 
-//=======================================================================
-// function : addInstance
-// purpose  : Adds the reference from the document
-//=======================================================================
-void VrmlData_ShapeConvert::addInstance(const Handle(VrmlData_Group)& theParent,
-    const TDF_Label& theLabel,
-    const Handle(TDocStd_Document)& theDoc)
+//=================================================================================================
+
+VrmlData_Scene::operator TopoDS_Shape() const
 {
-    Handle(XCAFDoc_ShapeTool) aShapeTool = XCAFDoc_DocumentTool::ShapeTool(theDoc->Main());
-
-    const TopLoc_Location  aLoc = aShapeTool->GetLocation(theLabel);
-    Handle(VrmlData_Group) aTrans = 0L;
-    if (!aLoc.IsIdentity())
-    {
-        // Create a Transform grouping node
-        aTrans = new VrmlData_Group(myScene, 0L, Standard_True);
-        gp_Trsf aTrsf(aLoc);
-        if (fabs(myScale - 1.) > Precision::Confusion())
-        {
-            const gp_XYZ aTransl = aTrsf.TranslationPart() * myScale;
-            aTrsf.SetTranslationPart(aTransl);
-        }
-        aTrans->SetTransform(aTrsf);
-        myScene.AddNode(aTrans, theParent.IsNull());
-        if (!theParent.IsNull())
-        {
-            theParent->AddNode(aTrans);
-        }
-    }
-
-    Handle(TDataStd_Name) aNameAttribute;
-    theLabel.FindAttribute(TDataStd_Name::GetID(), aNameAttribute);
-
-    TDF_Label aRefLabel;
-    aShapeTool->GetReferredShape(theLabel, aRefLabel);
-    Handle(TDataStd_Name) aRefNameAttribute;
-    aRefLabel.FindAttribute(TDataStd_Name::GetID(), aRefNameAttribute);
-
-    if (aShapeTool->IsSimpleShape(aRefLabel))
-    {
-        addShape((aTrans.IsNull() ? theParent : aTrans), aRefLabel, theDoc);
-    }
-    else if (aShapeTool->IsAssembly(aRefLabel))
-    {
-        addAssembly((aTrans.IsNull() ? theParent : aTrans), aRefLabel, theDoc, aTrans.IsNull());
-    }
+    TopoDS_Shape aShape;
+    VrmlData_Scene::createShape(aShape, myLstNodes, 0L);
+    return aShape;
 }
 
-//=======================================================================
-// function : addAssembly
-// purpose  : Adds the assembly from the document
-//=======================================================================
-void VrmlData_ShapeConvert::addAssembly(const Handle(VrmlData_Group)& theParent,
-    const TDF_Label& theLabel,
-    const Handle(TDocStd_Document)& theDoc,
-    const Standard_Boolean          theNeedCreateGroup)
-{
-    Handle(XCAFDoc_ShapeTool) aShapeTool = XCAFDoc_DocumentTool::ShapeTool(theDoc->Main());
+//=================================================================================================
 
-    Handle(VrmlData_Group) anAssembly = 0L;
-    if (theNeedCreateGroup)
+TopoDS_Shape VrmlData_Scene::GetShape(VrmlData_DataMapOfShapeAppearance& aMap)
+{
+    TopoDS_Shape aShape;
+    VrmlData_Scene::createShape(aShape, myLstNodes, &aMap);
+    return aShape;
+}
+
+//=================================================================================================
+
+void VrmlData_Scene::createShape(TopoDS_Shape& outShape,
+    const VrmlData_ListOfNode& lstNodes,
+    VrmlData_DataMapOfShapeAppearance* pMapShapeApp)
+{
+    TopoDS_Shape     aSingleShape; // used when there is a single ShapeNode
+    Standard_Boolean isSingleShape(Standard_True);
+    BRep_Builder     aBuilder;
+    outShape.Nullify();
+    aBuilder.MakeCompound(TopoDS::Compound(outShape));
+    aSingleShape.Orientation(TopAbs_FORWARD);
+
+    Iterator anIter(lstNodes);
+    for (; anIter.More(); anIter.Next())
     {
-        Handle(TDataStd_Name) aNameAttribute;
-        theLabel.FindAttribute(TDataStd_Name::GetID(), aNameAttribute);
-        if (!aNameAttribute.IsNull())
+        // Try a Shape type of node
+        const Handle(VrmlData_ShapeNode) aNodeShape =
+            Handle(VrmlData_ShapeNode)::DownCast(anIter.Value());
+        if (aNodeShape.IsNull() == Standard_False)
         {
-            TCollection_AsciiString aName = aNameAttribute->Get();
-            aName.ChangeAll(' ', '_');
-            aName.ChangeAll('#', '_');
-            anAssembly = new VrmlData_Group(myScene, aName.ToCString());
+            const Handle(VrmlData_Geometry) aNodeGeom = aNodeShape->Geometry();
+            if (aNodeGeom.IsNull() == Standard_False)
+            {
+                if (aSingleShape.IsNull() == Standard_False)
+                    isSingleShape = Standard_False;
+                const Handle(TopoDS_TShape) aTShape = aNodeGeom->TShape();
+                aSingleShape.TShape(aTShape);
+                if (aSingleShape.IsNull() == Standard_False)
+                {
+                    aBuilder.Add(outShape, aSingleShape);
+                    if (pMapShapeApp != 0L)
+                    {
+                        const Handle(VrmlData_Appearance)& anAppearance = aNodeShape->Appearance();
+                        if (anAppearance.IsNull() == Standard_False)
+                        {
+                            // Check if the current topology is a single face
+                            if (aTShape->IsKind(STANDARD_TYPE(TopoDS_TFace)))
+                                pMapShapeApp->Bind(aTShape, anAppearance);
+                            else
+                            {
+                                // This is not a face, explode it in faces and bind each face
+                                TopoDS_Shape aCurShape;
+                                aCurShape.TShape(aTShape);
+                                TopExp_Explorer anExp(aCurShape, TopAbs_FACE);
+                                for (; anExp.More(); anExp.Next())
+                                {
+                                    const TopoDS_Face& aFace = TopoDS::Face(anExp.Current());
+                                    pMapShapeApp->Bind(aFace.TShape(), anAppearance);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        // Try a Group type of node
+        const Handle(VrmlData_Group) aNodeGroup = Handle(VrmlData_Group)::DownCast(anIter.Value());
+        if (aNodeGroup.IsNull() == Standard_False)
+        {
+            TopoDS_Shape aShape;
+            aNodeGroup->Shape(aShape, pMapShapeApp);
+            if (aShape.IsNull() == Standard_False)
+            {
+                aBuilder.Add(outShape, aShape);
+                isSingleShape = Standard_False;
+            }
+        }
+    }
+    if (isSingleShape)
+        outShape = aSingleShape;
+}
+
+//=================================================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::ReadReal(VrmlData_InBuffer& theBuffer,
+    Standard_Real& theResult,
+    Standard_Boolean   isScale,
+    Standard_Boolean   isOnlyPositive) const
+{
+    Standard_Real        aResult(0.);
+    VrmlData_ErrorStatus aStatus;
+    if (VrmlData_Node::OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
+    {
+        char* endptr;
+        aResult = Strtod(theBuffer.LinePtr, &endptr);
+        if (endptr == theBuffer.LinePtr)
+            aStatus = VrmlData_NumericInputError;
+        else if (isOnlyPositive && aResult < 0.001 * Precision::Confusion())
+            aStatus = VrmlData_IrrelevantNumber;
+        else
+        {
+            theResult = isScale ? (aResult * myLinearScale) : aResult;
+            theBuffer.LinePtr = endptr;
+        }
+    }
+    return aStatus;
+}
+
+//=================================================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::ReadXYZ(VrmlData_InBuffer& theBuffer,
+    gp_XYZ& theXYZ,
+    Standard_Boolean   isScale,
+    Standard_Boolean   isOnlyPos) const
+{
+    Standard_Real        aVal[3] = { 0., 0., 0. };
+    VrmlData_ErrorStatus aStatus = VrmlData_StatusOK;
+    for (Standard_Integer i = 0; i < 3; i++)
+    {
+        if (!VrmlData_Node::OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
+            break;
+        char* endptr;
+        aVal[i] = Strtod(theBuffer.LinePtr, &endptr);
+        if (endptr == theBuffer.LinePtr)
+        {
+            aStatus = VrmlData_NumericInputError;
+            break;
         }
         else
         {
-            anAssembly = new VrmlData_Group(myScene, 0L);
-        }
-        TopLoc_Location aLoc = aShapeTool->GetLocation(theLabel);
-        if (!aLoc.IsIdentity())
-        {
-            gp_Trsf aTrsf(aLoc);
-            if (fabs(myScale - 1.) > Precision::Confusion())
+            if (isOnlyPos && aVal[i] < 0.001 * Precision::Confusion())
             {
-                const gp_XYZ aTransl = aTrsf.TranslationPart() * myScale;
-                aTrsf.SetTranslationPart(aTransl);
+                aStatus = VrmlData_IrrelevantNumber;
+                break;
             }
-            anAssembly->SetTransform(aTrsf);
-        }
-        myScene.AddNode(anAssembly, theParent.IsNull());
-        if (!theParent.IsNull())
-        {
-            theParent->AddNode(anAssembly);
+            theBuffer.LinePtr = endptr;
         }
     }
-
-    TDF_LabelSequence aChildLabels;
-    aShapeTool->GetComponents(theLabel, aChildLabels);
-    for (TDF_LabelSequence::Iterator aChildIter(aChildLabels); aChildIter.More(); aChildIter.Next())
+    if (aStatus == VrmlData_StatusOK)
     {
-        const TDF_Label& aChildLabel = aChildIter.Value();
-        if (aShapeTool->IsAssembly(aChildLabel))
+        if (isScale)
         {
-            addAssembly((anAssembly.IsNull() ? theParent : anAssembly),
-                aChildLabel,
-                theDoc,
-                anAssembly.IsNull());
+            theXYZ.SetCoord(aVal[0] * myLinearScale, aVal[1] * myLinearScale, aVal[2] * myLinearScale);
         }
-        else if (aShapeTool->IsReference(aChildLabel))
+        else
         {
-            addInstance((anAssembly.IsNull() ? theParent : anAssembly), aChildLabel, theDoc);
-        }
-        else if (aShapeTool->IsSimpleShape(aChildLabel))
-        {
-            addShape((anAssembly.IsNull() ? theParent : anAssembly), aChildLabel, theDoc);
+            theXYZ.SetCoord(aVal[0], aVal[1], aVal[2]);
         }
     }
+    return aStatus;
 }
 
 //=================================================================================================
 
-void VrmlData_ShapeConvert::ConvertDocument(const Handle(TDocStd_Document)& theDoc)
+VrmlData_ErrorStatus VrmlData_Scene::ReadXY(VrmlData_InBuffer& theBuffer,
+    gp_XY& theXY,
+    Standard_Boolean   isScale,
+    Standard_Boolean   isOnlyPos) const
 {
-    Handle(XCAFDoc_ShapeTool) aShapeTool = XCAFDoc_DocumentTool::ShapeTool(theDoc->Main());
-
-    TDF_LabelSequence aFreeShapeLabels;
-    aShapeTool->GetFreeShapes(aFreeShapeLabels);
-
-    Handle(VrmlData_Group) aGroup = 0L;
-    if (aFreeShapeLabels.Size() > 1)
+    Standard_Real        aVal[2] = { 0., 0. };
+    VrmlData_ErrorStatus aStatus = VrmlData_StatusOK;
+    for (Standard_Integer i = 0; i < 2; i++)
     {
-        aGroup = new VrmlData_Group(myScene, 0L);
-        myScene.AddNode(aGroup);
-    }
-
-    for (TDF_LabelSequence::Iterator aRootIter(aFreeShapeLabels); aRootIter.More(); aRootIter.Next())
-    {
-        const TDF_Label& aFreeShapeLabel = aRootIter.Value();
-        if (aShapeTool->IsAssembly(aFreeShapeLabel))
+        if (!VrmlData_Node::OK(aStatus, VrmlData_Scene::ReadLine(theBuffer)))
+            break;
+        char* endptr;
+        aVal[i] = Strtod(theBuffer.LinePtr, &endptr);
+        if (endptr == theBuffer.LinePtr)
         {
-            addAssembly(aGroup, aFreeShapeLabel, theDoc, Standard_True);
+            aStatus = VrmlData_NumericInputError;
+            break;
         }
-        else if (aShapeTool->IsReference(aFreeShapeLabel))
+        else
         {
-            addInstance(aGroup, aFreeShapeLabel, theDoc);
-        }
-        else if (aShapeTool->IsSimpleShape(aFreeShapeLabel))
-        {
-            addShape(aGroup, aFreeShapeLabel, theDoc);
+            if (isOnlyPos && aVal[i] < 0.001 * Precision::Confusion())
+            {
+                aStatus = VrmlData_IrrelevantNumber;
+                break;
+            }
+            theBuffer.LinePtr = endptr;
         }
     }
+    if (aStatus == VrmlData_StatusOK)
+    {
+        if (isScale)
+            theXY.SetCoord(aVal[0] * myLinearScale, aVal[1] * myLinearScale);
+        else
+            theXY.SetCoord(aVal[0], aVal[1]);
+    }
+    return aStatus;
+}
+
+//=======================================================================
+// function : ReadArrIndex
+// purpose  : Read the body of the data node (comma-separated list of int
+//           multiplets)
+//=======================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::ReadArrIndex(VrmlData_InBuffer& theBuffer,
+    const Standard_Integer**& theArray,
+    Standard_Size& theNBlocks) const
+{
+    Standard_Boolean isMaterialIndex(Standard_False);
+    if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "materialIndex"))
+    {
+        LOG_INFO("Skipping node with materialIndex...");
+        // Skip the "materialIndex" block and continue reading the next line
+        isMaterialIndex = Standard_True;
+    }
+    VrmlData_ErrorStatus aStatus;
+    theNBlocks = 0;
+    if (VrmlData_Node::OK(aStatus, ReadLine(theBuffer)))
+    {
+
+        if (theBuffer.LinePtr[0] != '[') // opening bracket
+            aStatus = VrmlData_VrmlFormatError;
+        else
+        {
+            theBuffer.LinePtr++;
+            NCollection_Vector<const Standard_Integer*> vecIndice;
+            NCollection_Vector<Standard_Integer>        vecInt;
+            Standard_Boolean                            isMore(Standard_True);
+            long                                        anIntValue;
+
+            // Loop reading integers from the stream
+            while (isMore && VrmlData_Node::OK(aStatus, ReadLine(theBuffer)))
+            {
+                if (isMaterialIndex) {
+                    while (theBuffer.LinePtr[0] != ']') {
+                        theBuffer.LinePtr++;
+                        aStatus = VrmlData_StatusOK;
+                    }
+                }
+                // closing bracket, in case that it follows a comma
+                if (theBuffer.LinePtr[0] == ']')
+                {
+                    theBuffer.LinePtr++;
+                    break;
+                }
+                if (!VrmlData_Node::OK(aStatus, VrmlData_Node::ReadInteger(theBuffer, anIntValue)))
+                    break;
+                // Check for valid delimiter (']' or ',')
+                if (!VrmlData_Node::OK(aStatus, ReadLine(theBuffer)))
+                    break;
+                if (theBuffer.LinePtr[0] == ']')
+                {
+                    theBuffer.LinePtr++;
+                    isMore = Standard_False;
+                }
+                if (anIntValue >= 0)
+                {
+                    if (vecInt.Length() > 2)
+                    {
+                        // additional check for redundant point:
+                        // ignore last point which is a duplicate of first point
+                        if (anIntValue == vecInt[0])
+                        {
+                            continue;
+                        }
+                    }
+                    // The input value is a node index, store it in the buffer vector
+                    vecInt.Append(static_cast<Standard_Integer>(anIntValue));
+                }
+                if ((anIntValue < 0 || isMore == Standard_False) && vecInt.Length() > 0)
+                {
+                    const Standard_Integer aLen = vecInt.Length();
+                    // The input is the end-of-face, store and close this face
+                    Standard_Integer* bufFace = static_cast<Standard_Integer*>(
+                        myAllocator->Allocate((aLen + 1) * sizeof(Standard_Integer)));
+                    if (bufFace == 0L)
+                    {
+                        aStatus = VrmlData_UnrecoverableError;
+                        break;
+                    }
+                    bufFace[0] = aLen;
+                    for (Standard_Integer i = 0; i < aLen; i++)
+                        bufFace[i + 1] = vecInt(i);
+                    vecInt.Clear();
+                    vecIndice.Append(bufFace);
+                }
+            }
+            if (aStatus == VrmlData_StatusOK)
+            {
+                const Standard_Size aNbBlocks = static_cast<Standard_Size>(vecIndice.Length());
+                if (aNbBlocks)
+                {
+                    const Standard_Integer** anArray = static_cast<const Standard_Integer**>(
+                        myAllocator->Allocate(aNbBlocks * sizeof(Standard_Integer*)));
+                    if (anArray == 0L)
+                        aStatus = VrmlData_UnrecoverableError;
+                    else
+                    {
+                        for (size_t i = 0; i < aNbBlocks; i++)
+                            anArray[i] = vecIndice((Standard_Integer)i);
+                        theNBlocks = aNbBlocks;
+                        theArray = anArray;
+                    }
+                }
+            }
+        }
+    }
+    return aStatus;
 }
 
 //=================================================================================================
 
-Handle(VrmlData_Appearance) VrmlData_ShapeConvert::makeMaterialFromStyle(
-    const XCAFPrs_Style& theStyle,
-    const TDF_Label& theAttribLab) const
+VrmlData_ErrorStatus VrmlData_Scene::WriteArrIndex(const char* thePrefix,
+    const Standard_Integer** theArrIndex,
+    const Standard_Size      theNbBlocks) const
 {
-    const Quantity_ColorRGBA aColor =
-        !theStyle.Material().IsNull() ? theStyle.Material()->BaseColor() : theStyle.GetColorSurfRGBA();
-
-    TCollection_AsciiString aNodeName = "_materialFace_";
-    Handle(TDataStd_Name)   aNameAttribute;
-    if (theAttribLab.FindAttribute(TDataStd_Name::GetID(), aNameAttribute))
+    VrmlData_ErrorStatus aStatus(VrmlData_StatusOK);
+    if (theNbBlocks && (IsDummyWrite() == Standard_False))
     {
-        aNodeName.AssignCat(aNameAttribute->Get());
-        Standard_Integer n = aNodeName.Search(" ");
-        if (n > 0)
+        if (VrmlData_Node::OK(aStatus, WriteLine(thePrefix, "[", 1)))
         {
-            aNodeName = aNodeName.SubString(1, n - 1);
+            const size_t aLineLimit = (myCurrentIndent < 41) ? 36 : 100;
+            char         buf[256];
+            for (Standard_Size iBlock = 0; iBlock < theNbBlocks; iBlock++)
+            {
+                const Standard_Integer  nVal(*theArrIndex[iBlock]);
+                const Standard_Integer* arrVal = theArrIndex[iBlock] + 1;
+                switch (nVal)
+                {
+                case 1:
+                    Sprintf(buf, "%d,", arrVal[0]);
+                    break;
+                case 2:
+                    Sprintf(buf, "%d,%d,", arrVal[0], arrVal[1]);
+                    break;
+                case 3:
+                    Sprintf(buf, "%d,%d,%d,", arrVal[0], arrVal[1], arrVal[2]);
+                    break;
+                case 4:
+                    Sprintf(buf, "%d,%d,%d,%d,", arrVal[0], arrVal[1], arrVal[2], arrVal[3]);
+                    break;
+                default:
+                    if (nVal > 0)
+                    {
+                        char* ptr = &buf[0];
+                        for (Standard_Integer i = 0; i < nVal; i++)
+                        {
+                            Sprintf(ptr, "%d,", arrVal[i]);
+                            if (i == nVal - 1)
+                                break;
+                            ptr = strchr(ptr, ',') + 1;
+                            if ((ptr - &buf[0]) > (ptrdiff_t)aLineLimit)
+                            {
+                                WriteLine(buf);
+                                ptr = &buf[0];
+                            }
+                        }
+                    }
+                }
+                WriteLine(buf, iBlock < theNbBlocks - 1 ? "-1," : "-1");
+            }
+            if (aStatus == VrmlData_StatusOK)
+                aStatus = WriteLine("]", 0L, -1);
         }
     }
+    return aStatus;
+}
+
+//=================================================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::WriteXYZ(const gp_XYZ& theXYZ,
+    const Standard_Boolean isApplyScale,
+    const char* thePostfix) const
+{
+    char buf[240];
+    if (IsDummyWrite() == Standard_False)
+    {
+        if (isApplyScale && myLinearScale > Precision::Confusion())
+            Sprintf(buf,
+                "%.12g %.12g %.12g%s",
+                theXYZ.X() / myLinearScale,
+                theXYZ.Y() / myLinearScale,
+                theXYZ.Z() / myLinearScale,
+                thePostfix ? thePostfix : "");
+        else
+            Sprintf(buf,
+                "%.12g %.12g %.12g%s",
+                theXYZ.X(),
+                theXYZ.Y(),
+                theXYZ.Z(),
+                thePostfix ? thePostfix : "");
+    }
+    return WriteLine(buf);
+}
+
+//=======================================================================
+// function : WriteLine
+// purpose  : write the given string prepending the current indentation
+//=======================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::WriteLine(const char* theLin0,
+    const char* theLin1,
+    const Standard_Integer theIndent) const
+{
+    static const char     spaces[] = "                                        "
+        "                                        ";
+    VrmlData_ErrorStatus& aStatus = const_cast<VrmlData_ErrorStatus&>(myStatus);
+    if (IsDummyWrite())
+        aStatus = VrmlData_StatusOK;
     else
     {
-        NCollection_Vec3<Standard_Real> aColor_sRGB;
-        aColor.GetRGB().Values(aColor_sRGB.r(), aColor_sRGB.g(), aColor_sRGB.b(), Quantity_TOC_sRGB);
-        aNodeName.AssignCat(aColor_sRGB.r());
-        aNodeName.AssignCat("_");
-        aNodeName.AssignCat(aColor_sRGB.g());
-        aNodeName.AssignCat("_");
-        aNodeName.AssignCat(aColor_sRGB.b());
+        Standard_Integer& aCurrentIndent = const_cast<Standard_Integer&>(myCurrentIndent);
+        if (theIndent < 0)
+            aCurrentIndent -= myIndent;
+        if (aCurrentIndent < 0)
+            aCurrentIndent = 0;
+        if (theLin0 == 0L && theLin1 == 0L)
+            (*myOutput) << "\n";
+        else
+        {
+            const Standard_Integer nSpaces = Min(aCurrentIndent, sizeof(spaces) - 1);
+            (*myOutput) << &spaces[sizeof(spaces) - 1 - nSpaces];
+            if (theLin0)
+            {
+                (*myOutput) << theLin0;
+                if (theLin1)
+                    (*myOutput) << " " << theLin1;
+            }
+            else
+                (*myOutput) << theLin1;
+            (*myOutput) << "\n";
+        }
+        const int stat = myOutput->rdstate();
+        if (stat & std::ios::badbit)
+            aStatus = VrmlData_UnrecoverableError;
+        else if (stat & std::ios::failbit)
+            //       if (stat & std::ios::eofbit)
+            //         aStatus = VrmlData_EndOfFile;
+            //       else
+            aStatus = VrmlData_GeneralError;
+        if (theIndent > 0)
+            aCurrentIndent += myIndent;
     }
+    return myStatus;
+}
 
-    Handle(VrmlData_Appearance) anAppearance =
-        Handle(VrmlData_Appearance)::DownCast(myScene.FindNode(aNodeName.ToCString()));
-    if (anAppearance.IsNull())
+//=================================================================================================
+
+VrmlData_ErrorStatus VrmlData_Scene::WriteNode(const char* thePrefix,
+    const Handle(VrmlData_Node)& theNode) const
+{
+    VrmlData_ErrorStatus aStatus(VrmlData_StatusOK);
+    Standard_Boolean     isNoName(Standard_False);
+    if (theNode->Name() == 0L)
+        isNoName = Standard_True;
+    else if (theNode->Name()[0] == '\0')
+        isNoName = Standard_True;
+
+    if (theNode.IsNull() == Standard_False)
+        if (theNode->IsDefault() == Standard_False)
+        {
+            if (isNoName && IsDummyWrite())
+            {
+                // We are in a tentative 'write' session (nothing is written).
+                // The goal is to identify multiply referred nodes.
+                Standard_Address addrNode = theNode.operator->();
+                if (!const_cast<NCollection_Map<Standard_Address>&>(myUnnamedNodesOut).Add(addrNode))
+                {
+                    Handle(VrmlData_UnknownNode) bidNode = new VrmlData_UnknownNode;
+                    char                         buf[32];
+                    do
+                    {
+                        Sprintf(buf, "_%d", ++const_cast<Standard_Integer&>(myAutoNameCounter));
+                        bidNode->myName = &buf[0];
+                    } while (myNamedNodes.Contains(bidNode));
+                    // We found the vacant automatic name, let us assign to it.
+                    theNode->setName(&buf[0]);
+                    const_cast<VrmlData_MapOfNode&>(myNamedNodes).Add(theNode);
+                    return aStatus; // do not search under already duplicated node
+                }
+            }
+            if (isNoName)
+                aStatus = theNode->Write(thePrefix);
+            else
+            {
+                // If the node name consists of blank characters, we do not write it
+                const char* nptr = theNode->Name();
+                for (; *nptr != '\0'; nptr++)
+                    if (*nptr != ' ' && *nptr != '\t')
+                        break;
+                if (*nptr == '\0')
+                    aStatus = theNode->Write(thePrefix);
+                else
+                {
+                    // Name is written under DEF clause
+                    TCollection_AsciiString buf;
+                    if (myNamedNodesOut.Contains(theNode))
+                    {
+                        buf += "USE ";
+                        buf += theNode->Name();
+                        aStatus = WriteLine(thePrefix, buf.ToCString());
+                    }
+                    else
+                    {
+                        if (thePrefix)
+                        {
+                            buf += thePrefix;
+                            buf += ' ';
+                        }
+                        buf += "DEF ";
+                        buf += theNode->Name();
+                        aStatus = theNode->Write(buf.ToCString());
+                        const_cast<VrmlData_MapOfNode&>(myNamedNodesOut).Add(theNode);
+                    }
+                }
+            }
+        }
+    return aStatus;
+}
+
+//=================================================================================================
+
+void VrmlData_Scene::Dump(Standard_OStream& theStream) const
+{
+    theStream << " ===== Diagnostic Dump of a Scene (" << myAllNodes.Extent() << " nodes)\n";
+
+    /*
+    Iterator anIterA(myAllNodes);
+    for (; anIterA.More(); anIterA.Next())
+      dumpNode(theStream, anIterA.Value(), "");
+    */
+    Iterator anIter(myLstNodes);
+    for (; anIter.More(); anIter.Next())
+        dumpNode(theStream, anIter.Value(), "  ");
+}
+
+//=======================================================================
+// function : dumpNode
+// purpose  : static (local) function
+//=======================================================================
+
+void dumpNode(Standard_OStream& theStream,
+    const Handle(VrmlData_Node)& theNode,
+    const TCollection_AsciiString& theIndent)
+{
+    if (theNode.IsNull())
+        return;
+    TCollection_AsciiString aNewIndent = theIndent.IsEmpty() ? theIndent : theIndent + "  ";
+    if (theNode->IsKind(STANDARD_TYPE(VrmlData_Appearance)))
     {
-        Handle(VrmlData_Material) aMaterial = new VrmlData_Material(myScene, 0L);
-        aMaterial->SetDiffuseColor(aColor.GetRGB());
-        myScene.AddNode(aMaterial, Standard_False);
-        anAppearance = new VrmlData_Appearance(myScene, aNodeName.ToCString());
-        anAppearance->SetMaterial(aMaterial);
-        myScene.AddNode(anAppearance, Standard_False);
+        const Handle(VrmlData_Appearance) anAppearance = Handle(VrmlData_Appearance)::DownCast(theNode);
+        dumpNodeHeader(theStream, theIndent, "Appearance", theNode->Name());
+        if (theIndent.IsEmpty() == Standard_False)
+        {
+            dumpNode(theStream, anAppearance->Material(), aNewIndent);
+            dumpNode(theStream, anAppearance->Texture(), aNewIndent);
+            dumpNode(theStream, anAppearance->TextureTransform(), aNewIndent);
+        }
     }
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_ShapeNode)))
+    {
+        const Handle(VrmlData_ShapeNode) aShape = Handle(VrmlData_ShapeNode)::DownCast(theNode);
+        dumpNodeHeader(theStream, theIndent, "Shape", theNode->Name());
+        if (theIndent.IsEmpty() == Standard_False)
+        {
+            dumpNode(theStream, aShape->Appearance(), aNewIndent);
+            dumpNode(theStream, aShape->Geometry(), aNewIndent);
+        }
+    }
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_Box)))
+        dumpNodeHeader(theStream, theIndent, "Box", theNode->Name());
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_Cylinder)))
+        dumpNodeHeader(theStream, theIndent, "Cylinder", theNode->Name());
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_Sphere)))
+        dumpNodeHeader(theStream, theIndent, "Sphere", theNode->Name());
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_Cone)))
+        dumpNodeHeader(theStream, theIndent, "Cone", theNode->Name());
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_Coordinate)))
+        dumpNodeHeader(theStream, theIndent, "Coordinate", theNode->Name());
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_Group)))
+    {
+        const Handle(VrmlData_Group) aGroup = Handle(VrmlData_Group)::DownCast(theNode);
+        char                         buf[64];
+        Sprintf(buf, "Group (%s)", aGroup->IsTransform() ? "Transform" : "Group");
+        dumpNodeHeader(theStream, theIndent, buf, theNode->Name());
+        if (theIndent.IsEmpty() == Standard_False)
+        {
+            VrmlData_ListOfNode::Iterator anIter = aGroup->NodeIterator();
+            for (; anIter.More(); anIter.Next())
+                dumpNode(theStream, anIter.Value(), aNewIndent);
+        }
+    }
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_ImageTexture)))
+        dumpNodeHeader(theStream, theIndent, "ImageTexture", theNode->Name());
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_IndexedFaceSet)))
+    {
+        const Handle(VrmlData_IndexedFaceSet) aNode =
+            Handle(VrmlData_IndexedFaceSet)::DownCast(theNode);
+        const Standard_Integer** ppDummy;
+        const Standard_Size      nCoord = aNode->Coordinates()->Length();
+        const Standard_Size      nPoly = aNode->Polygons(ppDummy);
+        char                     buf[80];
+        Sprintf(buf, "IndexedFaceSet (%" PRIuPTR " vertices, %" PRIuPTR " polygons)", nCoord, nPoly);
 
-    return anAppearance;
+        dumpNodeHeader(theStream, theIndent, buf, theNode->Name());
+    }
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_IndexedLineSet)))
+    {
+        const Handle(VrmlData_IndexedLineSet) aNode =
+            Handle(VrmlData_IndexedLineSet)::DownCast(theNode);
+        const Standard_Integer** ppDummy;
+        const Standard_Size      nCoord = aNode->Coordinates()->Length();
+        const Standard_Size      nPoly = aNode->Polygons(ppDummy);
+
+        char buf[80];
+        Sprintf(buf, "IndexedLineSet (%" PRIuPTR " vertices, %" PRIuPTR " polygons)", nCoord, nPoly);
+
+        dumpNodeHeader(theStream, theIndent, buf, theNode->Name());
+    }
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_Material)))
+    {
+        //     const Handle(VrmlData_Material) aMaterial =
+        //       Handle(VrmlData_Material)::DownCast (theNode);
+        dumpNodeHeader(theStream, theIndent, "Material", theNode->Name());
+    }
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_Normal)))
+        dumpNodeHeader(theStream, theIndent, "Normal", theNode->Name());
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_TextureCoordinate)))
+        dumpNodeHeader(theStream, theIndent, "TextureCoordinate", theNode->Name());
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_WorldInfo)))
+        dumpNodeHeader(theStream, theIndent, "WorldInfo", theNode->Name());
+    else if (theNode->IsKind(STANDARD_TYPE(VrmlData_UnknownNode)))
+    {
+        const Handle(VrmlData_UnknownNode) anUnknown = Handle(VrmlData_UnknownNode)::DownCast(theNode);
+        char                               buf[64];
+        Sprintf(buf, "Unknown (%s)", anUnknown->GetTitle().ToCString());
+        dumpNodeHeader(theStream, theIndent, buf, theNode->Name());
+    }
+}
+
+//=================================================================================================
+
+void dumpNodeHeader(Standard_OStream& theStream,
+    const TCollection_AsciiString& theIndent,
+    const char* theType,
+    const char* theName)
+{
+    theStream << theIndent << theType << " node";
+    if (theName[0] == '\0')
+        theStream << "\n";
+    else
+        theStream << ": \"" << theName << "\"\n";
 }
