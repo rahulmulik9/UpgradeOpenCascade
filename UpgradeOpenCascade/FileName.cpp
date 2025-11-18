@@ -575,7 +575,6 @@ VrmlData_ErrorStatus VrmlData_Scene::createNode(VrmlData_InBuffer& theBuffer,
         else if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "Coordinate"))
         {
             aNode = new VrmlData_Coordinate(*this, strName);
-
             // Check for "Coordinate3"
             if (VRMLDATA_LCOMPARE(theBuffer.LinePtr, "3"))
                 theBuffer.LinePtr++;
